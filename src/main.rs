@@ -1,12 +1,13 @@
-use actix_web::{get, middleware::Logger, post, web, App, HttpServer, Responder};
+use actix_web::{middleware::Logger, post, web::Data, App, HttpServer, Responder};
+use clap::Parser;
 use env_logger;
 use log;
 
-#[get("/hello/{name}")]
-async fn greet(name: web::Path<String>) -> impl Responder {
-    log::info!(target: "greet_handler", "Greeting {}", name);
-    format!("Hello {name}!")
-}
+mod api;
+mod config;
+mod judge;
+
+use config::Args;
 
 // DO NOT REMOVE: used in automatic testing
 #[post("/internal/exit")]
@@ -21,15 +22,21 @@ async fn exit() -> impl Responder {
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
-    HttpServer::new(|| {
+    let args = Args::parse();
+    let config = args.config.clone();
+
+    HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
-            .route("/hello", web::get().to(|| async { "Hello World!" }))
-            .service(greet)
+            .app_data(Data::new(config.clone()))
+            .service(api::jobs::new_job)
             // DO NOT REMOVE: used in automatic testing
             .service(exit)
     })
-    .bind(("127.0.0.1", 12345))?
+    .bind((
+        args.config.server.bind_address.to_string(),
+        args.config.server.bind_port,
+    ))?
     .run()
     .await
 }
