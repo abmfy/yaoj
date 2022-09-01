@@ -1,12 +1,22 @@
-use actix_web::{web::{Json, Data}, post};
-use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use std::sync::{Arc, Mutex};
 
-use super::err::{Reason, Error};
+use actix_web::{
+    get, post, put,
+    web::{Data, Json, Path, Query},
+};
+use chrono::{DateTime, Utc};
+use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
+
+use super::err::{Error, Reason};
 
 use crate::{config::Config, judge::judge};
 
-#[derive(Serialize, Deserialize)]
+lazy_static! {
+    static ref JOBS: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(Vec::new()));
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Submission {
     pub source_code: String,
     pub language: String,
@@ -15,7 +25,7 @@ pub struct Submission {
     pub problem_id: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobStatus {
     Queueing,
     Running,
@@ -23,7 +33,7 @@ pub enum JobStatus {
     Canceled,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobResult {
     Waiting,
     Running,
@@ -47,7 +57,7 @@ pub enum JobResult {
     Skipped,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct CaseResult {
     pub id: u32,
     pub result: JobResult,
@@ -55,7 +65,7 @@ pub struct CaseResult {
     pub memory: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Job {
     pub id: u32,
     pub created_time: DateTime<Utc>,
@@ -68,34 +78,193 @@ pub struct Job {
 }
 
 #[post("/jobs")]
-pub async fn new_job(submission: Json<Submission>, config: Data<Config>) -> Result<Json<Job>, Error> {
-    log::info!(target: "jobs", "New job received");
+/// Create a new submission
+pub async fn new_job(
+    submission: Json<Submission>,
+    config: Data<Config>,
+) -> Result<Json<Job>, Error> {
+    const TARGET: &str = "POST /jobs";
+    log::info!(target: TARGET, "Request received");
     match config.get_lang(&submission.language) {
         None => {
-            Err(Error::new(Reason::NotFound, format!("No such language: {}", submission.language)))
-        }
+            log::info!(target: TARGET, "No such language: {}", submission.language);
+            Err(Error::new(
+                Reason::NotFound,
+                format!("No such language: {}", submission.language),
+            ))
+        },
         Some(lang) => {
             match config.get_problem(submission.problem_id) {
                 None => {
-                    Err(Error::new(Reason::NotFound, format!("No such problem: {}", submission.problem_id)))
-                }
+                    log::info!(target: TARGET, "No such problem: {}", submission.problem_id);
+                    Err(Error::new(
+                        Reason::NotFound,
+                        format!("No such problem: {}", submission.problem_id),
+                    ))
+                },
                 Some(problem) => {
-                    log::info!(target: "jobs", "Begin judging");
                     let created = Utc::now();
-                    let result = judge(&submission.source_code, lang, problem);
-                    log::info!(target: "jobs", "Ended judging");
-                    Ok(Json(Job {
-                        id: 0,
+
+                    // Add the job to the jobs list with Running status
+                    let mut jobs = JOBS.lock().unwrap();
+                    let id = jobs.len() as u32;
+                    let job = Job {
+                        id,
                         created_time: created,
+                        updated_time: created,
+                        submission: submission.clone(),
+                        state: JobStatus::Running,
+                        result: JobResult::Waiting,
+                        score: 0.0,
+                        cases: vec![],
+                    };
+                    log::info!(target: TARGET, "Job {} created", job.id);
+                    jobs.push(job);
+                    drop(jobs);
+
+                    log::info!(target: TARGET, "Judging started");
+                    let result = judge(&submission.source_code, lang, problem);
+                    log::info!(target: TARGET, "Judging ended, result: {:?}", result.result);
+                    // Add the job to the jobs list
+                    let mut jobs = JOBS.lock().unwrap();
+                    let job = Job {
                         updated_time: Utc::now(),
-                        submission: submission.into_inner(),
                         state: JobStatus::Finished,
-                        result: result.0,
-                        score: result.1,
-                        cases: result.2,
-                    }).into())
+                        result: result.result,
+                        score: result.score,
+                        cases: result.cases,
+                        ..jobs[id as usize].clone()
+                    };
+                    jobs[id as usize] = job.clone();
+                    log::info!(target: TARGET, "Job {} added", id);
+                    log::info!(target: TARGET, "Request done");
+                    Ok(Json(job))
                 }
             }
         }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct JobFilter {
+    user_id: Option<u32>,
+    user_name: Option<String>,
+    contest_id: Option<u32>,
+    problem_id: Option<u32>,
+    language: Option<String>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    state: Option<JobStatus>,
+    result: Option<JobResult>,
+}
+
+#[get("/jobs")]
+pub async fn get_jobs(
+    filter: Query<JobFilter>,
+    config: Data<Config>,
+) -> Result<Json<Vec<Job>>, Error> {
+    const TARGET: &str = "GET /jobs";
+    log::info!(target: TARGET, "Request received");
+
+    let jobs = JOBS.lock().unwrap();
+    let mut filtered_jobs = Vec::new();
+    for job in jobs.iter() {
+        // Unimplemented:
+        // user_id
+        // user_name
+        // contest_id
+        if let Some(problem_id) = filter.problem_id {
+            if job.submission.problem_id != problem_id {
+                continue;
+            }
+        }
+        if let Some(language) = &filter.language {
+            if &job.submission.language != language {
+                continue;
+            }
+        }
+        if let Some(from) = filter.from {
+            if job.created_time < from {
+                continue;
+            }
+        }
+        if let Some(to) = filter.to {
+            if job.created_time > to {
+                continue;
+            }
+        }
+        if let Some(state) = filter.state {
+            if job.state != state {
+                continue;
+            }
+        }
+        if let Some(result) = filter.result {
+            if job.result != result {
+                continue;
+            }
+        }
+        filtered_jobs.push(job.clone());
+    }
+    log::info!(target: TARGET, "Request done");
+    Ok(Json(filtered_jobs))
+}
+
+#[get("/jobs/{id}")]
+pub async fn get_job(id: Path<u32>) -> Result<Json<Job>, Error> {
+    const TARGET: &str = "GET /jobs/{id}";
+    log::info!(target: TARGET, "Request received");
+    
+    let id = id.into_inner();
+    let jobs = JOBS.lock().unwrap();
+    if id >= jobs.len() as u32 {
+        log::info!(target: TARGET, "No such job: {id}");
+        Err(Error::new(
+            Reason::NotFound,
+            format!("Job {id} not found."),
+        ))
+    } else {
+        log::info!(target: TARGET, "Request done");
+        Ok(Json(jobs[id as usize].clone()))
+    }
+}
+
+#[put("/jobs/{id}")]
+pub async fn rejudge_job(id: Path<u32>, config: Data<Config>) -> Result<Json<Job>, Error> {
+    const TARGET: &str = "PUT /jobs/{id}";
+    log::info!(target: TARGET, "Request received");
+
+    let id = id.into_inner();
+    let mut jobs = JOBS.lock().unwrap();
+    if id >= jobs.len() as u32 {
+        log::info!(target: TARGET, "No such job: {id}");
+        Err(Error::new(
+            Reason::NotFound,
+            format!("Job {} not found.", id),
+        ))
+    } else {
+        jobs[id as usize].state = JobStatus::Running;
+        let job = jobs[id as usize].clone();
+        drop(jobs);
+
+        log::info!(target: TARGET, "Judging started");
+        let result = judge(
+            &job.submission.source_code,
+            config.get_lang(&job.submission.language).unwrap(),
+            config.get_problem(job.submission.problem_id).unwrap(),
+        );
+        log::info!(target: TARGET, "Judging ended, result: {:?}", result.result);
+
+        let mut jobs = JOBS.lock().unwrap();
+        jobs[id as usize] = Job {
+            updated_time: Utc::now(),
+            state: JobStatus::Finished,
+            result: result.result,
+            score: result.score,
+            cases: result.cases,
+            ..job
+        };
+        log::info!(target: TARGET, "Job {} updated", id);
+        log::info!(target: TARGET, "Request done");
+        Ok(Json(jobs[id as usize].clone()))
     }
 }

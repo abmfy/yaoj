@@ -6,12 +6,16 @@ use std::time::{Duration, Instant};
 use temp_dir::TempDir;
 use wait_timeout::ChildExt;
 
-use crate::api::{
-    jobs::{CaseResult, JobResult},
-};
+use crate::api::jobs::{CaseResult, JobResult};
 use crate::config::{Language, Problem, ProblemType};
 
-/// Auxiliary function for reading from a file 
+pub struct JudgeResult {
+    pub result: JobResult,
+    pub score: f64,
+    pub cases: Vec<CaseResult>,
+}
+
+/// Auxiliary function for reading from a file
 fn read(mut f: File) -> Result<String, io::Error> {
     let mut buf = String::new();
     f.read_to_string(&mut buf)?;
@@ -21,10 +25,10 @@ fn read(mut f: File) -> Result<String, io::Error> {
 /// Auxiliary function for trimming whitespace
 fn trim(f: File) -> Result<String, io::Error> {
     let buf = read(f)?;
-    
+
     // Trim whitespace at EOF
     let buf = buf.trim_end();
-    
+
     // Trim whitespace at EOF
     let mut result = String::new();
     for line in buf.split('\n') {
@@ -34,7 +38,10 @@ fn trim(f: File) -> Result<String, io::Error> {
 }
 
 /// Judge given code and return the result
-pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64, Vec<CaseResult>) {
+pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
+    const TARGET: &str = "judge";
+    log::info!(target: TARGET, "New judge task started, lang: {}, problem id: {}", lang.name, problem.id);
+
     // Create a temp directory for use
     let dir = TempDir::new().unwrap();
 
@@ -62,6 +69,7 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64,
 
     // Compilation error
     if result.is_err() || !result.unwrap().success() {
+        log::info!(target: TARGET, "Compilation error");
         let mut results = vec![CaseResult {
             id: 0,
             result: JobResult::CompilationError,
@@ -76,7 +84,11 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64,
                 memory: 0,
             });
         }
-        return (JobResult::CompilationError, 0.0, results);
+        return JudgeResult {
+            result: JobResult::CompilationError,
+            score: 0.0,
+            cases: results,
+        };
     }
 
     // Compilation success
@@ -93,6 +105,7 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64,
 
     // Judge
     for case in problem.cases.iter() {
+        let id = results.len() as u32;
         // Auxiliary function for reporting an system error
         fn system_error(results: &mut Vec<CaseResult>) {
             results.push(CaseResult {
@@ -108,12 +121,12 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64,
 
         // Unable to open file
         if input.is_err() {
-            log::error!(target: "judge", "Unable to open input file: {}", input.unwrap_err());
+            log::error!(target: TARGET, "Unable to open input file: {}", input.unwrap_err());
             system_error(&mut results);
             continue;
         }
         if output.is_err() {
-            log::error!(target: "judge", "Unable to open output file: {}", output.unwrap_err());
+            log::error!(target: TARGET, "Unable to open output file: {}", output.unwrap_err());
             system_error(&mut results);
             continue;
         }
@@ -126,7 +139,7 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64,
 
         // Unable to spawn process
         if child.is_err() {
-            log::error!(target: "judge", "Unable to spawn process: {}", child.unwrap_err());
+            log::error!(target: TARGET, "Unable to spawn process: {}", child.unwrap_err());
             system_error(&mut results);
             continue;
         }
@@ -136,36 +149,40 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64,
         let now = Instant::now();
 
         // Auxiliary function for inserting a new result
-        let mut update_result = |result: JobResult| {
+        let mut update_result = |result: JobResult, time: u32| {
             // Record first non-accepted result
             if result != JobResult::Accepted && result_type == JobResult::Accepted {
                 result_type = result;
             }
             results.push(CaseResult {
-                id: results.len() as u32,
+                id,
                 result,
-                time: now.elapsed().as_micros() as u32,
+                time,
                 memory: 0,
             });
         };
 
         // Wait for the process to finish and check status code
-        match child.wait_timeout(Duration::from_micros(case.time_limit as u64) + Duration::from_millis(500)) {
+        match child.wait_timeout(
+            Duration::from_micros(case.time_limit as u64) + Duration::from_millis(500),
+        ) {
             Ok(Some(status)) => {
                 // Exited, but with an error
                 if !status.success() {
-                    update_result(JobResult::RuntimeError);
+                    log::info!(target: TARGET, "Test case {id}: Runtime error");
+                    update_result(JobResult::RuntimeError, 0);
                     continue;
                 }
-            },
+            }
             // Child hasn't exited yet
             Ok(None) => {
                 match child.kill() {
                     Ok(_) => {
-                        update_result(JobResult::TimeLimitExceeded);
+                        log::info!(target: TARGET, "Test case {id}: Time limit exceeded");
+                        update_result(JobResult::TimeLimitExceeded, now.elapsed().as_micros() as u32);
                     }
                     Err(err) => {
-                        log::error!(target: "judge", "Unable to kill child process: {}", err);
+                        log::error!(target: TARGET, "Unable to kill child process: {}", err);
                         system_error(&mut results);
                     }
                 };
@@ -174,22 +191,25 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64,
             // Unknown error
             Err(err) => {
                 let _ = child.kill();
-                log::error!(target: "judge", "Unknown error when executing program: {}", err);
+                log::error!(target: TARGET, "Unknown error when executing program: {}", err);
                 system_error(&mut results);
                 continue;
             }
         };
 
+        let time = now.elapsed().as_micros() as u32;
+
         // Check if time limit exceeded
-        if now.elapsed().as_micros() as u32 > case.time_limit {
-            update_result(JobResult::TimeLimitExceeded);
+        if time > case.time_limit {
+            log::info!(target: TARGET, "Test case {id}: Time limit exceeded");
+            update_result(JobResult::TimeLimitExceeded, time);
             continue;
         }
 
         // Open the output file again
         let output = File::open(dir.child("output"));
         if output.is_err() {
-            log::error!(target: "judge", "Unable to open output file: {}", output.unwrap_err());
+            log::error!(target: TARGET, "Unable to open output file: {}", output.unwrap_err());
             system_error(&mut results);
             continue;
         }
@@ -198,7 +218,7 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64,
         // Open the answer file
         let answer = File::open(case.answer_file.clone());
         if answer.is_err() {
-            log::error!(target: "judge", "Unable to open answer file: {}", answer.unwrap_err());
+            log::error!(target: TARGET, "Unable to open answer file: {}", answer.unwrap_err());
             system_error(&mut results);
             continue;
         }
@@ -210,38 +230,40 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64,
             ProblemType::Standard => {
                 let output = trim(output);
                 if output.is_err() {
-                    log::error!(target: "judge", "Unable to read from output file: {}", output.unwrap_err());
+                    log::error!(target: TARGET, "Unable to read from output file: {}", output.unwrap_err());
                     system_error(&mut results);
                     continue;
                 }
                 let answer = trim(answer);
                 if output.is_err() {
-                    log::error!(target: "judge", "Unable to read from answer file: {}", answer.unwrap_err());
+                    log::error!(target: TARGET, "Unable to read from answer file: {}", answer.unwrap_err());
                     system_error(&mut results);
                     continue;
                 }
                 let output = output.unwrap();
                 let answer = answer.unwrap();
-                log::info!(target: "judge", "Output: {output}*EOF*");
-                log::info!(target: "judge", "Answer: {answer}*EOF*");
 
                 if output == answer {
+                    log::info!(target: TARGET, "Test case {id}: Accepted");
                     score += case.score;
-                    update_result(JobResult::Accepted);
+                    update_result(JobResult::Accepted, time);
                 } else {
-                    update_result(JobResult::WrongAnswer);
+                    log::info!(target: TARGET, "Test case {id}: Wrong Answer");
+                    log::info!(target: TARGET, "Output: {output}*EOF*");
+                    log::info!(target: TARGET, "Answer: {answer}*EOF*");
+                    update_result(JobResult::WrongAnswer, time);
                 }
             }
             ProblemType::Strict => {
                 let output = read(output);
                 if output.is_err() {
-                    log::error!(target: "judge", "Unable to read from output file: {}", output.unwrap_err());
+                    log::error!(target: TARGET, "Unable to read from output file: {}", output.unwrap_err());
                     system_error(&mut results);
                     continue;
                 }
                 let answer = read(answer);
                 if output.is_err() {
-                    log::error!(target: "judge", "Unable to read from answer file: {}", answer.unwrap_err());
+                    log::error!(target: TARGET, "Unable to read from answer file: {}", answer.unwrap_err());
                     system_error(&mut results);
                     continue;
                 }
@@ -249,15 +271,23 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> (JobResult, f64,
                 let answer = answer.unwrap();
 
                 if output == answer {
+                    log::info!(target: TARGET, "Test case {id}: Accepted");
                     score += case.score;
-                    update_result(JobResult::Accepted);
+                    update_result(JobResult::Accepted, time);
                 } else {
-                    update_result(JobResult::WrongAnswer);
+                    log::info!(target: TARGET, "Test case {id}: Wrong Answer");
+                    log::info!(target: TARGET, "Output: {output}*EOF*");
+                    log::info!(target: TARGET, "Answer: {answer}*EOF*");
+                    update_result(JobResult::WrongAnswer, time);
                 }
             }
-            _ => unimplemented!()
+            _ => unimplemented!(),
         }
     }
 
-    (result_type, score, results)
+    JudgeResult {
+        result: result_type,
+        score,
+        cases: results,
+    }
 }

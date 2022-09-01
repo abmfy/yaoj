@@ -5,7 +5,8 @@ use http::StatusCode;
 use serde::Serialize;
 
 /// Error reason
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(into = "String")]
 pub enum Reason {
     InvalidArgument,
     InvalidState,
@@ -15,8 +16,8 @@ pub enum Reason {
     Internal,
 }
 
-impl ToString for Reason {
-    fn to_string(&self) -> String {
+impl Into<String> for Reason {
+    fn into(self) -> String {
         "ERR_".to_string()
             + match self {
                 Reason::InvalidArgument => "INVALID_ARGUMENT",
