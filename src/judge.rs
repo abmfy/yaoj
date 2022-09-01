@@ -40,7 +40,12 @@ fn trim(f: File) -> Result<String, io::Error> {
 /// Judge given code and return the result
 pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
     const TARGET: &str = "judge";
-    log::info!(target: TARGET, "New judge task started, lang: {}, problem id: {}", lang.name, problem.id);
+    log::info!(
+        target: TARGET,
+        "New judge task started, lang: {}, problem id: {}",
+        lang.name,
+        problem.id
+    );
 
     // Create a temp directory for use
     let dir = TempDir::new().unwrap();
@@ -121,12 +126,20 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
 
         // Unable to open file
         if input.is_err() {
-            log::error!(target: TARGET, "Unable to open input file: {}", input.unwrap_err());
+            log::error!(
+                target: TARGET,
+                "Unable to open input file: {}",
+                input.unwrap_err()
+            );
             system_error(&mut results);
             continue;
         }
         if output.is_err() {
-            log::error!(target: TARGET, "Unable to open output file: {}", output.unwrap_err());
+            log::error!(
+                target: TARGET,
+                "Unable to open output file: {}",
+                output.unwrap_err()
+            );
             system_error(&mut results);
             continue;
         }
@@ -139,7 +152,11 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
 
         // Unable to spawn process
         if child.is_err() {
-            log::error!(target: TARGET, "Unable to spawn process: {}", child.unwrap_err());
+            log::error!(
+                target: TARGET,
+                "Unable to spawn process: {}",
+                child.unwrap_err()
+            );
             system_error(&mut results);
             continue;
         }
@@ -179,7 +196,10 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
                 match child.kill() {
                     Ok(_) => {
                         log::info!(target: TARGET, "Test case {id}: Time limit exceeded");
-                        update_result(JobResult::TimeLimitExceeded, now.elapsed().as_micros() as u32);
+                        update_result(
+                            JobResult::TimeLimitExceeded,
+                            now.elapsed().as_micros() as u32,
+                        );
                     }
                     Err(err) => {
                         log::error!(target: TARGET, "Unable to kill child process: {}", err);
@@ -191,7 +211,11 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
             // Unknown error
             Err(err) => {
                 let _ = child.kill();
-                log::error!(target: TARGET, "Unknown error when executing program: {}", err);
+                log::error!(
+                    target: TARGET,
+                    "Unknown error when executing program: {}",
+                    err
+                );
                 system_error(&mut results);
                 continue;
             }
@@ -209,7 +233,11 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
         // Open the output file again
         let output = File::open(dir.child("output"));
         if output.is_err() {
-            log::error!(target: TARGET, "Unable to open output file: {}", output.unwrap_err());
+            log::error!(
+                target: TARGET,
+                "Unable to open output file: {}",
+                output.unwrap_err()
+            );
             system_error(&mut results);
             continue;
         }
@@ -218,7 +246,11 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
         // Open the answer file
         let answer = File::open(case.answer_file.clone());
         if answer.is_err() {
-            log::error!(target: TARGET, "Unable to open answer file: {}", answer.unwrap_err());
+            log::error!(
+                target: TARGET,
+                "Unable to open answer file: {}",
+                answer.unwrap_err()
+            );
             system_error(&mut results);
             continue;
         }
@@ -230,13 +262,21 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
             ProblemType::Standard => {
                 let output = trim(output);
                 if output.is_err() {
-                    log::error!(target: TARGET, "Unable to read from output file: {}", output.unwrap_err());
+                    log::error!(
+                        target: TARGET,
+                        "Unable to read from output file: {}",
+                        output.unwrap_err()
+                    );
                     system_error(&mut results);
                     continue;
                 }
                 let answer = trim(answer);
                 if output.is_err() {
-                    log::error!(target: TARGET, "Unable to read from answer file: {}", answer.unwrap_err());
+                    log::error!(
+                        target: TARGET,
+                        "Unable to read from answer file: {}",
+                        answer.unwrap_err()
+                    );
                     system_error(&mut results);
                     continue;
                 }
@@ -257,13 +297,21 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
             ProblemType::Strict => {
                 let output = read(output);
                 if output.is_err() {
-                    log::error!(target: TARGET, "Unable to read from output file: {}", output.unwrap_err());
+                    log::error!(
+                        target: TARGET,
+                        "Unable to read from output file: {}",
+                        output.unwrap_err()
+                    );
                     system_error(&mut results);
                     continue;
                 }
                 let answer = read(answer);
                 if output.is_err() {
-                    log::error!(target: TARGET, "Unable to read from answer file: {}", answer.unwrap_err());
+                    log::error!(
+                        target: TARGET,
+                        "Unable to read from answer file: {}",
+                        answer.unwrap_err()
+                    );
                     system_error(&mut results);
                     continue;
                 }

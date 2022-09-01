@@ -9,11 +9,12 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 
 use super::err::{Error, Reason};
+use super::users;
 
 use crate::{config::Config, judge::judge};
 
 lazy_static! {
-    static ref JOBS: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(Vec::new()));
+    static ref JOBS: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(vec![]));
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -25,7 +26,7 @@ pub struct Submission {
     pub problem_id: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobStatus {
     Queueing,
     Running,
@@ -92,7 +93,7 @@ pub async fn new_job(
                 Reason::NotFound,
                 format!("No such language: {}", submission.language),
             ))
-        },
+        }
         Some(lang) => {
             match config.get_problem(submission.problem_id) {
                 None => {
@@ -101,8 +102,16 @@ pub async fn new_job(
                         Reason::NotFound,
                         format!("No such problem: {}", submission.problem_id),
                     ))
-                },
+                }
                 Some(problem) => {
+                    if !users::does_user_exist(submission.user_id) {
+                        log::info!(target: TARGET, "No such user: {}", submission.user_id);
+                        return Err(Error::new(
+                            Reason::NotFound,
+                            format!("No such user: {}", submission.user_id),
+                        ));
+                    }
+
                     let created = Utc::now();
 
                     // Add the job to the jobs list with Running status
@@ -169,10 +178,21 @@ pub async fn get_jobs(
     let jobs = JOBS.lock().unwrap();
     let mut filtered_jobs = Vec::new();
     for job in jobs.iter() {
-        // Unimplemented:
-        // user_id
-        // user_name
-        // contest_id
+        if let Some(user_id) = filter.user_id {
+            if job.submission.user_id != user_id {
+                continue;
+            }
+        }
+        if let Some(name) = &filter.user_name {
+            if let Some(id) = users::get_id_by_username(name) {
+                if job.submission.user_id != id {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+        // Unimplemented: contest_id
         if let Some(problem_id) = filter.problem_id {
             if job.submission.problem_id != problem_id {
                 continue;
@@ -213,15 +233,12 @@ pub async fn get_jobs(
 pub async fn get_job(id: Path<u32>) -> Result<Json<Job>, Error> {
     const TARGET: &str = "GET /jobs/{id}";
     log::info!(target: TARGET, "Request received");
-    
+
     let id = id.into_inner();
     let jobs = JOBS.lock().unwrap();
     if id >= jobs.len() as u32 {
         log::info!(target: TARGET, "No such job: {id}");
-        Err(Error::new(
-            Reason::NotFound,
-            format!("Job {id} not found."),
-        ))
+        Err(Error::new(Reason::NotFound, format!("Job {id} not found.")))
     } else {
         log::info!(target: TARGET, "Request done");
         Ok(Json(jobs[id as usize].clone()))
@@ -242,6 +259,18 @@ pub async fn rejudge_job(id: Path<u32>, config: Data<Config>) -> Result<Json<Job
             format!("Job {} not found.", id),
         ))
     } else {
+        // Guard that the job is in Finished state
+        if jobs[id as usize].state != JobStatus::Finished {
+            log::info!(
+                target: TARGET,
+                "Job {id} not finished: it's in {:?} state",
+                jobs[id as usize].state
+            );
+            return Err(Error::new(
+                Reason::InvalidState,
+                format!("Job {id} not finished."),
+            ));
+        }
         jobs[id as usize].state = JobStatus::Running;
         let job = jobs[id as usize].clone();
         drop(jobs);
