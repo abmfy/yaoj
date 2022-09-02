@@ -14,7 +14,7 @@ use super::users;
 use crate::{config::Config, judge::judge};
 
 lazy_static! {
-    static ref JOBS: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(vec![]));
+    pub static ref JOBS: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(vec![]));
 }
 
 #[derive(Clone, Serialize, Deserialize)]

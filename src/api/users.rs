@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use actix_web::{get, post, web::Json};
 use lazy_static::lazy_static;
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::err::{Error, Reason};
 
 lazy_static! {
-    static ref USERS: Arc<Mutex<Vec<User>>> = Arc::new(Mutex::new(vec![User {
+    pub static ref USERS: Arc<Mutex<Vec<User>>> = Arc::new(Mutex::new(vec![User {
         id: 0,
         name: "root".to_string(),
     }]));
@@ -15,8 +15,8 @@ lazy_static! {
 
 #[derive(Clone, Serialize)]
 pub struct User {
-    id: u32,
-    name: String,
+    pub id: u32,
+    pub name: String,
 }
 
 #[derive(Deserialize)]
@@ -50,7 +50,7 @@ pub async fn update_user(user: Json<UserUpdate>) -> Result<Json<User>, Error> {
     let UserUpdate { id, name } = user.into_inner();
 
     let mut users = USERS.lock().unwrap();
-    
+
     // Check if the username is used
     if users.iter().any(|user| user.name == name) {
         log::info!(target: TARGET, "Username {name} is used");

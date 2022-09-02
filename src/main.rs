@@ -52,6 +52,7 @@ async fn main() -> std::io::Result<()> {
             .service(api::jobs::rejudge_job)
             .service(api::users::update_user)
             .service(api::users::get_users)
+            .service(api::contests::get_rank_list)
             // DO NOT REMOVE: used in automatic testing
             .service(exit)
     })
