@@ -21,12 +21,21 @@ pub struct User {
 }
 
 /// Returns if the user with specified id exists
-pub fn does_user_exist(conn: &mut SqliteConnection, id: i32) -> Result<bool, Error> {
+pub fn does_user_exist(conn: &mut SqliteConnection, uid: i32) -> Result<bool, Error> {
     use self::users::dsl::*;
 
-    let user = users.find(id).first::<User>(conn).optional()?;
+    let user = users.find(uid).first::<User>(conn).optional()?;
 
     Ok(user.is_some())
+}
+
+/// Returns how many users are there
+pub fn user_count(conn: &mut SqliteConnection) -> Result<i32, Error> {
+    use self::users::dsl::*;
+
+    let count: i64 = users.count().get_result(conn)?;
+
+    Ok(count as i32)
 }
 
 /// Get user id by username
@@ -80,6 +89,16 @@ pub fn update_user(conn: &mut SqliteConnection, user_form: UserForm) -> Result<U
             .values(user_form)
             .get_result(conn)?)
     }
+}
+
+/// Get user by id
+pub fn get_user(conn: &mut SqliteConnection, uid: i32) -> Result<User, Error> {
+    use self::users::dsl::*;
+
+    users.find(uid).first(conn).optional()?.ok_or(Error::new(
+        Reason::NotFound,
+        format!("User {uid} not found."),
+    ))
 }
 
 /// Get all users

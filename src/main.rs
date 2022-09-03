@@ -5,6 +5,11 @@ use actix_web::{
     App, HttpServer, Responder,
 };
 use clap::Parser;
+use diesel::{
+    r2d2::{ConnectionManager, Pool},
+    Connection, SqliteConnection,
+};
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use env_logger;
 use log;
 
@@ -15,6 +20,11 @@ mod persistent;
 
 use api::err::{Error, Reason};
 use config::Args;
+
+type DbPool = Pool<ConnectionManager<SqliteConnection>>;
+
+const DB_URL: &str = "oj.db";
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 // DO NOT REMOVE: used in automatic testing
 #[post("/internal/exit")]
@@ -32,6 +42,22 @@ async fn main() -> std::io::Result<()> {
     let args = Args::parse();
     let config = args.config.clone();
 
+    // Delete existing database
+    if args.flush_data {
+        log::info!("Flushing persistent data");
+        std::fs::remove_file(DB_URL).expect("Failed to remove database");
+    }
+
+    // Run migrations
+    SqliteConnection::establish(DB_URL)
+        .expect("Failed to establish database connection")
+        .run_pending_migrations(MIGRATIONS)
+        .expect("Failed to run migrations");
+
+    // Create connection pool
+    let manager = ConnectionManager::<SqliteConnection>::new(DB_URL);
+    let pool = Pool::new(manager).expect("Failed to create database pool");
+
     // Config parameter extractor so that we return a unified JSON response when argument is invalid
     let query_cfg = QueryConfig::default()
         .error_handler(|err, _| Error::new(Reason::InvalidArgument, err.to_string()).into());
@@ -44,6 +70,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(Logger::default())
             .app_data(Data::new(config.clone()))
+            .app_data(Data::new(pool.clone()))
             .app_data(query_cfg.clone())
             .app_data(path_cfg.clone())
             .app_data(json_cfg.clone())

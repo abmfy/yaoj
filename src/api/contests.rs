@@ -2,14 +2,15 @@ use std::{cmp::Ordering, collections::HashMap};
 
 use actix_web::{
     get,
-    web::{Data, Json, Query},
+    web::{self, Data, Json, Query},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{api::users::USERS, config::Config};
+use crate::persistent::models::User;
+use crate::{config::Config, persistent::models, DbPool};
 
-use super::{err::Error, jobs::JOBS, users::User};
+use super::{err::Error, jobs::Job};
 
 #[derive(Serialize, Deserialize)]
 struct Contest {
@@ -42,8 +43,8 @@ impl TieBreaker {
     /// Compare the ranking of two users
     pub fn compare(
         &self,
-        (id_a, a): &(u32, &HashMap<u32, ProblemResult>),
-        (id_b, b): &(u32, &HashMap<u32, ProblemResult>),
+        (id_a, a): &(i32, &HashMap<i32, ProblemResult>),
+        (id_b, b): &(i32, &HashMap<i32, ProblemResult>),
     ) -> Ordering {
         let total_score_a: f64 = a.values().map(|result| result.score).sum();
         let total_score_b: f64 = b.values().map(|result| result.score).sum();
@@ -106,9 +107,12 @@ pub struct ProblemResult {
 pub async fn get_rank_list(
     rule: Query<RankingRule>,
     config: Data<Config>,
+    pool: Data<DbPool>,
 ) -> Result<Json<Vec<RankingItem>>, Error> {
     const TARGET: &str = "GET /contests/0/ranklist";
     log::info!(target: TARGET, "Request received");
+
+    let conn = &mut web::block(move || pool.get()).await??;
 
     let RankingRule {
         scoring_rule,
@@ -120,13 +124,13 @@ pub async fn get_rank_list(
 
     // submissions[id] means the submissions for user 'id', and
     // it is a hash map 'm' where m[p_id] means the user's score on problem 'p_id'
-    let users = USERS.lock().unwrap();
-    let user_count = users.len();
-    drop(users);
-    let mut submissions: Vec<HashMap<u32, ProblemResult>> = vec![HashMap::new(); user_count];
+    let user_count = models::user_count(conn)?;
+    let mut submissions: Vec<HashMap<i32, ProblemResult>> =
+        vec![HashMap::new(); user_count as usize];
 
-    let jobs = JOBS.lock().unwrap();
-    for job in jobs.iter() {
+    let jobs = models::get_jobs(conn, Default::default())?;
+    for job in jobs {
+        let job: Job = job.into();
         let user_id = job.submission.user_id;
         let problem_id = job.submission.problem_id;
         let score = job.score;
@@ -161,13 +165,12 @@ pub async fn get_rank_list(
                 submission_count: 1,
             });
     }
-    drop(jobs);
 
     // Ranking according to the tie breaker rule
     let mut rank_list: Vec<_> = submissions
         .iter()
         .enumerate()
-        .map(|(k, v)| (k as u32, v))
+        .map(|(k, v)| (k as i32, v))
         .collect();
     rank_list.sort_by(|(id_a, a), (id_b, b)| {
         match tie_breaker.compare(&(*id_a, a), &(*id_b, b)) {
@@ -180,11 +183,10 @@ pub async fn get_rank_list(
 
     // Construct the response
     let mut response: Vec<RankingItem> = vec![];
-    let users = USERS.lock().unwrap();
     for (rank, (user_id, _)) in rank_list.iter().enumerate() {
         let last_rank = response.last().map(|item| item.rank).unwrap_or_default();
         response.push(RankingItem {
-            user: users[*user_id as usize].clone(),
+            user: models::get_user(conn, *user_id)?,
             // Calculate rank
             rank: if rank == 0 {
                 1

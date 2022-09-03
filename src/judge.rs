@@ -224,7 +224,7 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
         let time = now.elapsed().as_micros() as u32;
 
         // Check if time limit exceeded
-        if time > case.time_limit {
+        if time > case.time_limit as u32 {
             log::info!(target: TARGET, "Test case {id}: Time limit exceeded");
             update_result(JobResult::TimeLimitExceeded, time);
             continue;

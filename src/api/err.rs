@@ -1,6 +1,6 @@
 use std::fmt::{self, Display};
 
-use actix_web::{HttpResponse, ResponseError};
+use actix_web::{error::BlockingError, HttpResponse, ResponseError};
 use http::StatusCode;
 use serde::Serialize;
 
@@ -60,7 +60,21 @@ impl Error {
 impl From<diesel::result::Error> for Error {
     fn from(err: diesel::result::Error) -> Self {
         log::error!(target: "persistent", "Database error: {}", err);
-        Error::new(Reason::External, format!("Database error: {}", err))
+        Error::new(Reason::External, format!("Database error"))
+    }
+}
+
+impl From<r2d2::Error> for Error {
+    fn from(err: r2d2::Error) -> Self {
+        log::error!(target: "persistent", "Connection pool error: {}", err);
+        Error::new(Reason::External, format!("Database error"))
+    }
+}
+
+impl From<BlockingError> for Error {
+    fn from(err: BlockingError) -> Self {
+        log::error!(target: "persistent", "Blocking error: {}", err);
+        Error::new(Reason::External, format!("Database error"))
     }
 }
 

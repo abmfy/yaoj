@@ -7,39 +7,46 @@ use crate::api::err::{Error, Reason};
 use crate::api::jobs::{CaseResults, JobResult, JobStatus};
 use crate::persistent::schema::jobs;
 
-#[derive(Queryable)]
+#[derive(Clone, Queryable, Insertable, AsChangeset, Identifiable)]
 pub struct Job {
-    id: i32,
-    created_time: NaiveDateTime,
-    updated_time: NaiveDateTime,
-    source_code: String,
-    lang: String,
-    user_id: i32,
-    contest_id: i32,
-    problem_id: i32,
-    job_state: JobStatus,
-    result: JobResult,
-    score: f64,
-    cases: CaseResults,
+    pub id: i32,
+    pub created_time: NaiveDateTime,
+    pub updated_time: NaiveDateTime,
+    pub source_code: String,
+    pub lang: String,
+    pub user_id: i32,
+    pub contest_id: i32,
+    pub problem_id: i32,
+    pub job_state: JobStatus,
+    pub result: JobResult,
+    pub score: f64,
+    pub cases: CaseResults,
 }
 
-#[derive(Insertable, AsChangeset)]
-#[diesel(table_name = jobs)]
-pub struct JobForm {
-    created_time: NaiveDateTime,
-    updated_time: NaiveDateTime,
-    source_code: String,
-    lang: String,
-    user_id: i32,
-    contest_id: i32,
-    problem_id: i32,
-    job_state: JobStatus,
-    result: JobResult,
-    score: f64,
-    cases: CaseResults,
+/// We need to convert between api::jobs::Job and persistent::models::Job
+/// because the response need to be serialized to json with
+/// some deeper nested structure (the submission substructure), white
+/// the latter need to be flatten to be stored in the database
+impl From<crate::api::jobs::Job> for Job {
+    fn from(job: crate::api::jobs::Job) -> Self {
+        Job {
+            id: job.id,
+            created_time: job.created_time.naive_utc(),
+            updated_time: job.updated_time.naive_utc(),
+            source_code: job.submission.source_code,
+            lang: job.submission.language,
+            user_id: job.submission.user_id,
+            contest_id: job.submission.contest_id,
+            problem_id: job.submission.problem_id,
+            job_state: job.state,
+            result: job.result,
+            score: job.score,
+            cases: CaseResults(job.cases),
+        }
+    }
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct JobFilter {
     pub user_id: Option<i32>,
     pub user_name: Option<String>,
@@ -53,19 +60,25 @@ pub struct JobFilter {
 }
 
 /// Returns if a specific job exists
-pub fn does_job_exist(conn: &mut SqliteConnection, id: i32) -> Result<bool, Error> {
+pub fn does_job_exist(conn: &mut SqliteConnection, jid: i32) -> Result<bool, Error> {
     use self::jobs::dsl::*;
 
-    let job = jobs
-        .find(id)
-        .first::<Job>(conn)
-        .optional()?;
+    let job = jobs.find(jid).first::<Job>(conn).optional()?;
 
     Ok(job.is_some())
 }
 
+/// Returns the count of jobs
+pub fn jobs_count(conn: &mut SqliteConnection) -> Result<i32, Error> {
+    use self::jobs::dsl::*;
+
+    let count: i64 = jobs.count().get_result(conn)?;
+
+    Ok(count as i32)
+}
+
 /// Add a new job to the database
-pub fn new_job(conn: &mut SqliteConnection, job_form: JobForm) -> Result<Job, Error> {
+pub fn new_job(conn: &mut SqliteConnection, job_form: Job) -> Result<Job, Error> {
     use self::jobs::dsl::*;
 
     Ok(diesel::insert_into(jobs)
@@ -77,7 +90,7 @@ pub fn new_job(conn: &mut SqliteConnection, job_form: JobForm) -> Result<Job, Er
 pub fn get_job(conn: &mut SqliteConnection, jid: i32) -> Result<Job, Error> {
     use self::jobs::dsl::*;
 
-    jobs.find(id).first(conn).optional()?.ok_or(Error::new(
+    jobs.find(jid).first(conn).optional()?.ok_or(Error::new(
         Reason::NotFound,
         format!("Job {} not found.", jid),
     ))
@@ -118,14 +131,10 @@ pub fn get_jobs(conn: &mut SqliteConnection, filt: JobFilter) -> Result<Vec<Job>
         query = query.filter(result.eq(res));
     }
 
-    Ok(vec![])
+    Ok(query.load(conn)?)
 }
 
 /// Update an existing job
-pub fn update_job(conn: &mut SqliteConnection, jid: i32, job_form: JobForm) -> Result<Job, Error> {
-    use self::jobs::dsl::*;
-
-    Ok(diesel::update(jobs.find(jid))
-        .set(job_form)
-        .get_result(conn)?)
+pub fn update_job(conn: &mut SqliteConnection, job_form: Job) -> Result<Job, Error> {
+    Ok(job_form.save_changes(conn)?)
 }

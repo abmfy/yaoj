@@ -1,11 +1,6 @@
-use std::{
-    fmt::format,
-    sync::{Arc, Mutex},
-};
-
 use actix_web::{
     get, post, put,
-    web::{Data, Json, Path, Query},
+    web::{self, Data, Json, Path, Query},
 };
 use chrono::{DateTime, Utc};
 use diesel::{
@@ -16,29 +11,22 @@ use diesel::{
     sqlite::Sqlite,
     AsExpression, FromSqlRow,
 };
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::err::{Error, Reason};
-use super::users;
 
-use crate::{
-    config::{Case, Config},
-    judge::judge,
-};
+use crate::{persistent::models, DbPool};
 
-lazy_static! {
-    pub static ref JOBS: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(vec![]));
-}
+use crate::{config::Config, judge::judge};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Submission {
     pub source_code: String,
     pub language: String,
-    pub user_id: u32,
-    pub contest_id: u32,
-    pub problem_id: u32,
+    pub user_id: i32,
+    pub contest_id: i32,
+    pub problem_id: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, AsExpression, FromSqlRow)]
@@ -71,7 +59,7 @@ where
             1 => Ok(JobStatus::Running),
             2 => Ok(JobStatus::Finished),
             3 => Ok(JobStatus::Canceled),
-            x => Err("Unrecognized enum variant {x}".into()),
+            x => Err(format!("Unrecognized enum variant {x}").into()),
         }
     }
 }
@@ -130,7 +118,7 @@ where
             9 => Ok(JobResult::SystemError),
             10 => Ok(JobResult::SpjError),
             11 => Ok(JobResult::Skipped),
-            x => Err("Unrecognized enum variant {x}".into()),
+            x => Err(format!("Unrecognized enum variant {x}").into()),
         }
     }
 }
@@ -143,9 +131,9 @@ pub struct CaseResult {
     pub memory: u32,
 }
 
-#[derive(Debug, AsExpression, FromSqlRow)]
+#[derive(Clone, Debug, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Text)]
-pub struct CaseResults(Vec<CaseResult>);
+pub struct CaseResults(pub Vec<CaseResult>);
 
 impl ToSql<Text, Sqlite> for CaseResults
 where
@@ -171,7 +159,7 @@ where
 
 #[derive(Clone, Serialize)]
 pub struct Job {
-    pub id: u32,
+    pub id: i32,
     pub created_time: DateTime<Utc>,
     pub updated_time: DateTime<Utc>,
     pub submission: Submission,
@@ -181,14 +169,39 @@ pub struct Job {
     pub cases: Vec<CaseResult>,
 }
 
+impl From<models::Job> for Job {
+    fn from(job: models::Job) -> Self {
+        Self {
+            id: job.id,
+            created_time: job.created_time.and_local_timezone(Utc).unwrap(),
+            updated_time: job.updated_time.and_local_timezone(Utc).unwrap(),
+            submission: Submission {
+                source_code: job.source_code,
+                language: job.lang,
+                user_id: job.user_id,
+                contest_id: job.contest_id,
+                problem_id: job.problem_id,
+            },
+            state: job.job_state,
+            result: job.result,
+            score: job.score,
+            cases: job.cases.0,
+        }
+    }
+}
+
 #[post("/jobs")]
 /// Create a new submission
 pub async fn new_job(
     submission: Json<Submission>,
     config: Data<Config>,
+    pool: Data<DbPool>,
 ) -> Result<Json<Job>, Error> {
     const TARGET: &str = "POST /jobs";
     log::info!(target: TARGET, "Request received");
+
+    let conn = &mut web::block(move || pool.get()).await??;
+
     match config.get_lang(&submission.language) {
         None => {
             log::info!(target: TARGET, "No such language: {}", submission.language);
@@ -207,7 +220,9 @@ pub async fn new_job(
                     ))
                 }
                 Some(problem) => {
-                    if !users::does_user_exist(submission.user_id) {
+                    let uid = submission.user_id;
+                    let user_exists = models::does_user_exist(conn, uid)?;
+                    if !user_exists {
                         log::info!(target: TARGET, "No such user: {}", submission.user_id);
                         return Err(Error::new(
                             Reason::NotFound,
@@ -215,147 +230,99 @@ pub async fn new_job(
                         ));
                     }
 
-                    let created = Utc::now();
+                    let created = Utc::now().naive_utc();
 
                     // Add the job to the jobs list with Running status
-                    let mut jobs = JOBS.lock().unwrap();
-                    let id = jobs.len() as u32;
-                    let job = Job {
-                        id,
+                    let job = models::Job {
+                        id: models::jobs_count(conn)?,
                         created_time: created,
                         updated_time: created,
-                        submission: submission.clone(),
-                        state: JobStatus::Running,
+                        source_code: submission.source_code.clone(),
+                        lang: submission.language.clone(),
+                        user_id: submission.user_id,
+                        contest_id: submission.contest_id,
+                        problem_id: submission.problem_id,
+                        job_state: JobStatus::Running,
                         result: JobResult::Waiting,
                         score: 0.0,
-                        cases: vec![],
+                        cases: CaseResults(vec![]),
                     };
-                    log::info!(target: TARGET, "Job {} created", job.id);
-                    jobs.push(job);
-                    drop(jobs);
+                    let job_id = models::new_job(conn, job.clone())?.id;
+                    log::info!(target: TARGET, "Job {} created", job_id);
 
                     log::info!(target: TARGET, "Judging started");
                     let result = judge(&submission.source_code, lang, problem);
                     log::info!(target: TARGET, "Judging ended, result: {:?}", result.result);
                     // Add the job to the jobs list
-                    let mut jobs = JOBS.lock().unwrap();
-                    let job = Job {
-                        updated_time: Utc::now(),
-                        state: JobStatus::Finished,
+                    let job = models::Job {
+                        updated_time: Utc::now().naive_utc(),
+                        job_state: JobStatus::Finished,
                         result: result.result,
                         score: result.score,
-                        cases: result.cases,
-                        ..jobs[id as usize].clone()
+                        cases: CaseResults(result.cases),
+                        ..job
                     };
-                    jobs[id as usize] = job.clone();
-                    log::info!(target: TARGET, "Job {} added", id);
+                    let job = models::update_job(conn, job)?;
+                    log::info!(target: TARGET, "Job {} added", job_id);
                     log::info!(target: TARGET, "Request done");
-                    Ok(Json(job))
+                    Ok(Json(job.into()))
                 }
             }
         }
     }
 }
 
-#[derive(Deserialize)]
-pub struct JobFilter {
-    pub user_id: Option<u32>,
-    pub user_name: Option<String>,
-    pub contest_id: Option<u32>,
-    pub problem_id: Option<u32>,
-    pub language: Option<String>,
-    pub from: Option<DateTime<Utc>>,
-    pub to: Option<DateTime<Utc>>,
-    pub state: Option<JobStatus>,
-    pub result: Option<JobResult>,
-}
+type JobFilter = models::JobFilter;
 
 #[get("/jobs")]
 pub async fn get_jobs(
     filter: Query<JobFilter>,
-    config: Data<Config>,
+    pool: Data<DbPool>,
 ) -> Result<Json<Vec<Job>>, Error> {
     const TARGET: &str = "GET /jobs";
     log::info!(target: TARGET, "Request received");
 
-    let jobs = JOBS.lock().unwrap();
-    let mut filtered_jobs = Vec::new();
-    for job in jobs.iter() {
-        if let Some(user_id) = filter.user_id {
-            if job.submission.user_id != user_id {
-                continue;
-            }
-        }
-        if let Some(name) = &filter.user_name {
-            if let Some(id) = users::get_id_by_username(name) {
-                if job.submission.user_id != id {
-                    continue;
-                }
-            } else {
-                continue;
-            }
-        }
-        // Unimplemented: contest_id
-        if let Some(problem_id) = filter.problem_id {
-            if job.submission.problem_id != problem_id {
-                continue;
-            }
-        }
-        if let Some(language) = &filter.language {
-            if &job.submission.language != language {
-                continue;
-            }
-        }
-        if let Some(from) = filter.from {
-            if job.created_time < from {
-                continue;
-            }
-        }
-        if let Some(to) = filter.to {
-            if job.created_time > to {
-                continue;
-            }
-        }
-        if let Some(state) = filter.state {
-            if job.state != state {
-                continue;
-            }
-        }
-        if let Some(result) = filter.result {
-            if job.result != result {
-                continue;
-            }
-        }
-        filtered_jobs.push(job.clone());
-    }
+    let filtered_jobs = web::block(move || {
+        let mut conn = pool.get()?;
+        models::get_jobs(&mut conn, filter.into_inner())
+    })
+    .await??;
+
     log::info!(target: TARGET, "Request done");
-    Ok(Json(filtered_jobs))
+    Ok(Json(
+        filtered_jobs.into_iter().map(|job| job.into()).collect(),
+    ))
 }
 
 #[get("/jobs/{id}")]
-pub async fn get_job(id: Path<u32>) -> Result<Json<Job>, Error> {
+pub async fn get_job(id: Path<i32>, pool: Data<DbPool>) -> Result<Json<Job>, Error> {
     const TARGET: &str = "GET /jobs/{id}";
     log::info!(target: TARGET, "Request received");
 
     let id = id.into_inner();
-    let jobs = JOBS.lock().unwrap();
-    if id >= jobs.len() as u32 {
-        log::info!(target: TARGET, "No such job: {id}");
-        Err(Error::new(Reason::NotFound, format!("Job {id} not found.")))
-    } else {
-        log::info!(target: TARGET, "Request done");
-        Ok(Json(jobs[id as usize].clone()))
-    }
+    let job = web::block(move || {
+        let mut conn = pool.get()?;
+        models::get_job(&mut conn, id)
+    })
+    .await??;
+    log::info!(target: TARGET, "Request done");
+    Ok(Json(job.into()))
 }
 
 #[put("/jobs/{id}")]
-pub async fn rejudge_job(id: Path<u32>, config: Data<Config>) -> Result<Json<Job>, Error> {
+pub async fn rejudge_job(
+    id: Path<i32>,
+    config: Data<Config>,
+    pool: Data<DbPool>,
+) -> Result<Json<Job>, Error> {
     const TARGET: &str = "PUT /jobs/{id}";
     log::info!(target: TARGET, "Request received");
 
+    let conn = &mut web::block(move || pool.get()).await??;
+
     let id = id.into_inner();
-    let mut jobs = JOBS.lock().unwrap();
-    if id >= jobs.len() as u32 {
+    let job_exists = models::does_job_exist(conn, id)?;
+    if !job_exists {
         log::info!(target: TARGET, "No such job: {id}");
         Err(Error::new(
             Reason::NotFound,
@@ -363,20 +330,32 @@ pub async fn rejudge_job(id: Path<u32>, config: Data<Config>) -> Result<Json<Job
         ))
     } else {
         // Guard that the job is in Finished state
-        if jobs[id as usize].state != JobStatus::Finished {
+        let job = models::get_job(conn, id)?;
+        if job.job_state != JobStatus::Finished {
             log::info!(
                 target: TARGET,
                 "Job {id} not finished: it's in {:?} state",
-                jobs[id as usize].state
+                job.job_state
             );
             return Err(Error::new(
                 Reason::InvalidState,
                 format!("Job {id} not finished."),
             ));
         }
-        jobs[id as usize].state = JobStatus::Running;
-        let job = jobs[id as usize].clone();
-        drop(jobs);
+
+        // Modify the state to be running
+        let job: Job = models::update_job(
+            conn,
+            models::Job {
+                updated_time: Utc::now().naive_utc(),
+                job_state: JobStatus::Running,
+                result: JobResult::Waiting,
+                score: 0.0,
+                cases: CaseResults(vec![]),
+                ..job.into()
+            },
+        )?
+        .into();
 
         log::info!(target: TARGET, "Judging started");
         let result = judge(
@@ -386,17 +365,18 @@ pub async fn rejudge_job(id: Path<u32>, config: Data<Config>) -> Result<Json<Job
         );
         log::info!(target: TARGET, "Judging ended, result: {:?}", result.result);
 
-        let mut jobs = JOBS.lock().unwrap();
-        jobs[id as usize] = Job {
-            updated_time: Utc::now(),
-            state: JobStatus::Finished,
+        // Update the job
+        let job = models::Job {
+            updated_time: Utc::now().naive_utc(),
+            job_state: JobStatus::Finished,
             result: result.result,
             score: result.score,
-            cases: result.cases,
-            ..job
+            cases: CaseResults(result.cases),
+            ..job.into()
         };
+        let job = models::update_job(conn, job)?;
         log::info!(target: TARGET, "Job {} updated", id);
         log::info!(target: TARGET, "Request done");
-        Ok(Json(jobs[id as usize].clone()))
+        Ok(Json(job.into()))
     }
 }
