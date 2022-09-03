@@ -1,17 +1,32 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    fmt::format,
+    sync::{Arc, Mutex},
+};
 
 use actix_web::{
     get, post, put,
     web::{Data, Json, Path, Query},
 };
 use chrono::{DateTime, Utc};
+use diesel::{
+    backend::{self, Backend},
+    deserialize::FromSql,
+    serialize::{IsNull, Output, ToSql},
+    sql_types::{Integer, Text},
+    sqlite::Sqlite,
+    AsExpression, FromSqlRow,
+};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use super::err::{Error, Reason};
 use super::users;
 
-use crate::{config::Config, judge::judge};
+use crate::{
+    config::{Case, Config},
+    judge::judge,
+};
 
 lazy_static! {
     pub static ref JOBS: Arc<Mutex<Vec<Job>>> = Arc::new(Mutex::new(vec![]));
@@ -26,7 +41,8 @@ pub struct Submission {
     pub problem_id: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Integer)]
 pub enum JobStatus {
     Queueing,
     Running,
@@ -34,7 +50,34 @@ pub enum JobStatus {
     Canceled,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl ToSql<Integer, Sqlite> for JobStatus
+where
+    i32: ToSql<Integer, Sqlite>,
+{
+    fn to_sql<'a>(&'a self, out: &mut Output<'a, '_, Sqlite>) -> diesel::serialize::Result {
+        out.set_value(*self as i32);
+        Ok(IsNull::No)
+    }
+}
+
+impl<DB> FromSql<Integer, DB> for JobStatus
+where
+    DB: Backend,
+    i32: FromSql<Integer, DB>,
+{
+    fn from_sql(bytes: backend::RawValue<DB>) -> diesel::deserialize::Result<Self> {
+        match i32::from_sql(bytes)? {
+            0 => Ok(JobStatus::Queueing),
+            1 => Ok(JobStatus::Running),
+            2 => Ok(JobStatus::Finished),
+            3 => Ok(JobStatus::Canceled),
+            x => Err("Unrecognized enum variant {x}".into()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Integer)]
 pub enum JobResult {
     Waiting,
     Running,
@@ -58,12 +101,72 @@ pub enum JobResult {
     Skipped,
 }
 
-#[derive(Clone, Serialize)]
+impl ToSql<Integer, Sqlite> for JobResult
+where
+    i32: ToSql<Integer, Sqlite>,
+{
+    fn to_sql<'a>(&'a self, out: &mut Output<'a, '_, Sqlite>) -> diesel::serialize::Result {
+        out.set_value(*self as i32);
+        Ok(IsNull::No)
+    }
+}
+
+impl<DB> FromSql<Integer, DB> for JobResult
+where
+    DB: Backend,
+    i32: FromSql<Integer, DB>,
+{
+    fn from_sql(bytes: backend::RawValue<DB>) -> diesel::deserialize::Result<Self> {
+        match i32::from_sql(bytes)? {
+            0 => Ok(JobResult::Waiting),
+            1 => Ok(JobResult::Running),
+            2 => Ok(JobResult::Accepted),
+            3 => Ok(JobResult::CompilationError),
+            4 => Ok(JobResult::CompilationSuccess),
+            5 => Ok(JobResult::WrongAnswer),
+            6 => Ok(JobResult::RuntimeError),
+            7 => Ok(JobResult::TimeLimitExceeded),
+            8 => Ok(JobResult::MemoryLimitExceeded),
+            9 => Ok(JobResult::SystemError),
+            10 => Ok(JobResult::SpjError),
+            11 => Ok(JobResult::Skipped),
+            x => Err("Unrecognized enum variant {x}".into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CaseResult {
     pub id: u32,
     pub result: JobResult,
     pub time: u32,
     pub memory: u32,
+}
+
+#[derive(Debug, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Text)]
+pub struct CaseResults(Vec<CaseResult>);
+
+impl ToSql<Text, Sqlite> for CaseResults
+where
+    String: ToSql<Text, Sqlite>,
+{
+    fn to_sql<'a>(&'a self, out: &mut Output<'a, '_, Sqlite>) -> diesel::serialize::Result {
+        out.set_value(json!(self.0).to_string());
+        Ok(IsNull::No)
+    }
+}
+
+impl<DB> FromSql<Text, DB> for CaseResults
+where
+    DB: Backend,
+    String: FromSql<Text, DB>,
+{
+    fn from_sql(bytes: backend::RawValue<DB>) -> diesel::deserialize::Result<Self> {
+        let s = String::from_sql(bytes)?;
+        let v = serde_json::from_str(&s)?;
+        Ok(CaseResults(v))
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -156,15 +259,15 @@ pub async fn new_job(
 
 #[derive(Deserialize)]
 pub struct JobFilter {
-    user_id: Option<u32>,
-    user_name: Option<String>,
-    contest_id: Option<u32>,
-    problem_id: Option<u32>,
-    language: Option<String>,
-    from: Option<DateTime<Utc>>,
-    to: Option<DateTime<Utc>>,
-    state: Option<JobStatus>,
-    result: Option<JobResult>,
+    pub user_id: Option<u32>,
+    pub user_name: Option<String>,
+    pub contest_id: Option<u32>,
+    pub problem_id: Option<u32>,
+    pub language: Option<String>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub state: Option<JobStatus>,
+    pub result: Option<JobResult>,
 }
 
 #[get("/jobs")]

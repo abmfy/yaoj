@@ -11,6 +11,7 @@ use log;
 mod api;
 mod config;
 mod judge;
+mod persistent;
 
 use api::err::{Error, Reason};
 use config::Args;

@@ -4,3 +4,4 @@
 *.http
 tmp/
 .vscode
+oj.db

@@ -57,6 +57,13 @@ impl Error {
     }
 }
 
+impl From<diesel::result::Error> for Error {
+    fn from(err: diesel::result::Error) -> Self {
+        log::error!(target: "persistent", "Database error: {}", err);
+        Error::new(Reason::External, format!("Database error: {}", err))
+    }
+}
+
 impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.message)
