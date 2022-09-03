@@ -43,7 +43,8 @@ async fn main() -> std::io::Result<()> {
     // Delete existing database
     if args.flush_data {
         log::info!("Flushing persistent data");
-        std::fs::remove_file(DB_URL).expect("Failed to remove database");
+        // It's ok that the database doesn't exist
+        let _ = std::fs::remove_file(DB_URL);
     }
 
     // Run migrations
