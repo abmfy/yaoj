@@ -95,10 +95,18 @@ pub fn update_user(conn: &mut SqliteConnection, user_form: UserForm) -> Result<U
 pub fn get_user(conn: &mut SqliteConnection, uid: i32) -> Result<User, Error> {
     use self::users::dsl::*;
 
-    users.find(uid).first(conn).optional()?.ok_or(Error::new(
-        Reason::NotFound,
-        format!("User {uid} not found."),
-    ))
+    users
+        .find(uid)
+        .first(conn)
+        .optional()?
+        .ok_or_else(|| Error::new(Reason::NotFound, format!("User {uid} not found.")))
+}
+
+/// Get selected users
+pub fn get_some_users(conn: &mut SqliteConnection, ids: Vec<i32>) -> Result<Vec<User>, Error> {
+    use self::users::dsl::*;
+
+    Ok(users.filter(id.eq_any(ids)).load(conn)?)
 }
 
 /// Get all users

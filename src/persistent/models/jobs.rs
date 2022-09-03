@@ -30,14 +30,14 @@ pub struct Job {
 impl From<crate::api::jobs::Job> for Job {
     fn from(job: crate::api::jobs::Job) -> Self {
         Job {
-            id: job.id,
+            id: job.id as i32,
             created_time: job.created_time.naive_utc(),
             updated_time: job.updated_time.naive_utc(),
             source_code: job.submission.source_code,
             lang: job.submission.language,
-            user_id: job.submission.user_id,
-            contest_id: job.submission.contest_id,
-            problem_id: job.submission.problem_id,
+            user_id: job.submission.user_id as i32,
+            contest_id: job.submission.contest_id as i32,
+            problem_id: job.submission.problem_id as i32,
             job_state: job.state,
             result: job.result,
             score: job.score,
@@ -90,10 +90,10 @@ pub fn new_job(conn: &mut SqliteConnection, job_form: Job) -> Result<Job, Error>
 pub fn get_job(conn: &mut SqliteConnection, jid: i32) -> Result<Job, Error> {
     use self::jobs::dsl::*;
 
-    jobs.find(jid).first(conn).optional()?.ok_or(Error::new(
-        Reason::NotFound,
-        format!("Job {} not found.", jid),
-    ))
+    jobs.find(jid)
+        .first(conn)
+        .optional()?
+        .ok_or_else(|| Error::new(Reason::NotFound, format!("Job {} not found.", jid)))
 }
 
 /// Get filtered jobs
@@ -132,6 +132,59 @@ pub fn get_jobs(conn: &mut SqliteConnection, filt: JobFilter) -> Result<Vec<Job>
     }
 
     Ok(query.load(conn)?)
+}
+
+/// Get the latest submission of a user on a problem in a contest
+pub fn get_latest_submission(
+    conn: &mut SqliteConnection,
+    uid: i32,
+    pid: i32,
+    cid: i32,
+) -> Result<Option<Job>, Error> {
+    use self::jobs::dsl::*;
+
+    Ok(jobs
+        .filter(user_id.eq(uid))
+        .filter(problem_id.eq(pid))
+        .filter(contest_id.eq(cid))
+        .order(created_time.desc())
+        .first(conn)
+        .optional()?)
+}
+
+/// Get the submission which score is highest of a user on a problem in a contest
+pub fn get_highest_submission(
+    conn: &mut SqliteConnection,
+    uid: i32,
+    pid: i32,
+    cid: i32,
+) -> Result<Option<Job>, Error> {
+    use self::jobs::dsl::*;
+
+    Ok(jobs
+        .filter(user_id.eq(uid))
+        .filter(problem_id.eq(pid))
+        .filter(contest_id.eq(cid))
+        .order(score.desc())
+        .first(conn)
+        .optional()?)
+}
+
+/// Get the count of submissions on a problem of a user in a contest
+pub fn get_submission_count(
+    conn: &mut SqliteConnection,
+    uid: i32,
+    pid: i32,
+    cid: i32,
+) -> Result<i64, Error> {
+    use self::jobs::dsl::*;
+
+    Ok(jobs
+        .filter(user_id.eq(uid))
+        .filter(problem_id.eq(pid))
+        .filter(contest_id.eq(cid))
+        .count()
+        .get_result(conn)?)
 }
 
 /// Update an existing job

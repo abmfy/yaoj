@@ -14,7 +14,10 @@ use diesel::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::err::{Error, Reason};
+use super::{
+    contests::Contest,
+    err::{Error, Reason},
+};
 
 use crate::{persistent::models, DbPool};
 
@@ -24,9 +27,9 @@ use crate::{config::Config, judge::judge};
 pub struct Submission {
     pub source_code: String,
     pub language: String,
-    pub user_id: i32,
-    pub contest_id: i32,
-    pub problem_id: i32,
+    pub user_id: u32,
+    pub contest_id: u32,
+    pub problem_id: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, AsExpression, FromSqlRow)]
@@ -159,8 +162,10 @@ where
 
 #[derive(Clone, Serialize)]
 pub struct Job {
-    pub id: i32,
+    pub id: u32,
+    #[serde(serialize_with = "super::serialize_date_time")]
     pub created_time: DateTime<Utc>,
+    #[serde(serialize_with = "super::serialize_date_time")]
     pub updated_time: DateTime<Utc>,
     pub submission: Submission,
     pub state: JobStatus,
@@ -172,15 +177,15 @@ pub struct Job {
 impl From<models::Job> for Job {
     fn from(job: models::Job) -> Self {
         Self {
-            id: job.id,
+            id: job.id as u32,
             created_time: job.created_time.and_local_timezone(Utc).unwrap(),
             updated_time: job.updated_time.and_local_timezone(Utc).unwrap(),
             submission: Submission {
                 source_code: job.source_code,
                 language: job.lang,
-                user_id: job.user_id,
-                contest_id: job.contest_id,
-                problem_id: job.problem_id,
+                user_id: job.user_id as u32,
+                contest_id: job.contest_id as u32,
+                problem_id: job.problem_id as u32,
             },
             state: job.job_state,
             result: job.result,
@@ -220,14 +225,68 @@ pub async fn new_job(
                     ))
                 }
                 Some(problem) => {
+                    let pid = problem.id;
                     let uid = submission.user_id;
-                    let user_exists = models::does_user_exist(conn, uid)?;
+                    let user_exists = models::does_user_exist(conn, uid as i32)?;
                     if !user_exists {
                         log::info!(target: TARGET, "No such user: {}", submission.user_id);
                         return Err(Error::new(
                             Reason::NotFound,
                             format!("No such user: {}", submission.user_id),
                         ));
+                    }
+
+                    let cid = submission.contest_id;
+                    // Check validity when submits to a specific contest
+                    if cid != 0 {
+                        let contest: Contest = models::get_contest(conn, cid as i32)
+                            .map_err(|err| match err.reason {
+                                Reason::NotFound => {
+                                    log::info!(target: TARGET, "No such contest: {cid}");
+                                    Error::new(Reason::NotFound, format!("No such contest: {cid}"))
+                                }
+                                _ => err,
+                            })?
+                            .into();
+                        if !contest.user_ids.contains(&uid) {
+                            log::info!(target: TARGET, "User {uid} not in contest {cid}");
+                            return Err(Error::new(
+                                Reason::InvalidArgument,
+                                format!("User {uid} not in contest {cid}"),
+                            ));
+                        }
+                        if !contest.problem_ids.contains(&pid) {
+                            log::info!(target: TARGET, "Problem {pid} not in contest {cid}");
+                            return Err(Error::new(
+                                Reason::InvalidArgument,
+                                format!("Problem {pid} not in contest {cid}"),
+                            ));
+                        }
+                        let now = Utc::now();
+                        if now < contest.from {
+                            log::info!(target: TARGET, "Contest {cid} hasn't yet begun");
+                            return Err(Error::new(
+                                Reason::InvalidArgument,
+                                format!("Contest {cid} hasn't yet begun"),
+                            ));
+                        }
+                        if now > contest.to {
+                            log::info!(target: TARGET, "Contest {cid} has already ended");
+                            return Err(Error::new(
+                                Reason::InvalidArgument,
+                                format!("Contest {cid} has already ended"),
+                            ));
+                        }
+                        if models::get_submission_count(conn, uid as i32, pid as i32, cid as i32)?
+                            as u32
+                            >= contest.submission_limit
+                        {
+                            log::info!(target: TARGET, "Submission limit exceeded");
+                            return Err(Error::new(
+                                Reason::RateLimit,
+                                "Submission limit exceeded".to_string(),
+                            ));
+                        }
                     }
 
                     let created = Utc::now().naive_utc();
@@ -239,9 +298,9 @@ pub async fn new_job(
                         updated_time: created,
                         source_code: submission.source_code.clone(),
                         lang: submission.language.clone(),
-                        user_id: submission.user_id,
-                        contest_id: submission.contest_id,
-                        problem_id: submission.problem_id,
+                        user_id: submission.user_id as i32,
+                        contest_id: submission.contest_id as i32,
+                        problem_id: submission.problem_id as i32,
                         job_state: JobStatus::Running,
                         result: JobResult::Waiting,
                         score: 0.0,
@@ -352,7 +411,7 @@ pub async fn rejudge_job(
                 result: JobResult::Waiting,
                 score: 0.0,
                 cases: CaseResults(vec![]),
-                ..job.into()
+                ..job
             },
         )?
         .into();

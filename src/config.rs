@@ -44,7 +44,7 @@ pub enum ProblemType {
 /// A problem
 #[derive(Clone, Deserialize)]
 pub struct Problem {
-    pub id: i32,
+    pub id: u32,
     pub name: String,
     #[serde(rename = "type")]
     pub typ: ProblemType,
@@ -75,7 +75,7 @@ impl Config {
     }
 
     /// Get specified problem
-    pub fn get_problem(&self, id: i32) -> Option<&Problem> {
+    pub fn get_problem(&self, id: u32) -> Option<&Problem> {
         self.problems.iter().find(|p| p.id == id)
     }
 }

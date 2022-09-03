@@ -1,26 +1,150 @@
-use std::{cmp::Ordering, collections::HashMap};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+};
 
 use actix_web::{
-    get,
-    web::{self, Data, Json, Query},
+    get, post,
+    web::{self, Data, Json, Path, Query},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::persistent::models::User;
+use crate::{api::err::Reason, config::Problem, persistent::models::User};
 use crate::{config::Config, persistent::models, DbPool};
 
-use super::{err::Error, jobs::Job};
+use super::err::Error;
 
 #[derive(Serialize, Deserialize)]
-struct Contest {
-    id: u32,
-    name: String,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-    problem_ids: Vec<u32>,
-    use_ids: Vec<u32>,
-    submission_limit: u32,
+pub struct Contest {
+    pub id: Option<u32>,
+    pub name: String,
+    #[serde(serialize_with = "super::serialize_date_time")]
+    pub from: DateTime<Utc>,
+    #[serde(serialize_with = "super::serialize_date_time")]
+    pub to: DateTime<Utc>,
+    pub problem_ids: Vec<u32>,
+    pub user_ids: Vec<u32>,
+    pub submission_limit: u32,
+}
+
+impl From<models::Contest> for Contest {
+    fn from(contest: models::Contest) -> Self {
+        Self {
+            id: Some(contest.id as u32),
+            name: contest.contest_name,
+            from: contest.contest_from.and_local_timezone(Utc).unwrap(),
+            to: contest.contest_to.and_local_timezone(Utc).unwrap(),
+            problem_ids: contest
+                .problem_ids
+                .split(',')
+                .map(|s| s.parse::<u32>().unwrap())
+                .collect(),
+            user_ids: contest
+                .user_ids
+                .split(',')
+                .map(|s| s.parse::<u32>().unwrap())
+                .collect(),
+            submission_limit: contest.submission_limit as u32,
+        }
+    }
+}
+
+#[post("/contests")]
+pub async fn update_contest(
+    contest: Json<Contest>,
+    config: Data<Config>,
+    pool: Data<DbPool>,
+) -> Result<Json<Contest>, Error> {
+    const TARGET: &str = "POST /contests";
+    log::info!(target: TARGET, "Request received");
+
+    let contest = contest.into_inner();
+
+    let conn = &mut web::block(move || pool.get()).await??;
+
+    // Check validity of problems
+    let problem_set: HashSet<_> = config.problems.iter().map(|p| p.id).collect();
+    for pid in &contest.problem_ids {
+        if !problem_set.contains(pid) {
+            log::info!(target: TARGET, "No such problem: {pid}");
+            return Err(Error::new(
+                Reason::NotFound,
+                format!("Unknown problem: {pid}"),
+            ));
+        }
+    }
+
+    // Check validity of users
+    let user_count = models::user_count(conn)? as u32;
+    for uid in &contest.user_ids {
+        if uid >= &user_count {
+            log::info!(target: TARGET, "No such user: {uid}");
+            return Err(Error::new(Reason::NotFound, format!("Unknown user: {uid}")));
+        }
+    }
+
+    // Update
+    if let Some(id) = contest.id {
+        let contest =
+            models::update_contest(conn, contest.into()).map_err(|err| match err.reason {
+                // Give a more detailed description when not found
+                Reason::NotFound => {
+                    log::info!(target: TARGET, "No such contest: {id}");
+                    Error::new(Reason::NotFound, format!("Contest {id} not found."))
+                }
+                _ => err,
+            })?;
+        log::info!(target: TARGET, "Request done");
+        Ok(Json(contest.into()))
+    } else {
+        // Insert
+        let cid = models::contests_count(conn)? as u32 + 1;
+        let contest = Contest {
+            id: Some(cid),
+            ..contest
+        };
+        let contest = models::new_contest(conn, contest.into())?;
+        log::info!(target: TARGET, "Request done");
+        Ok(Json(contest.into()))
+    }
+}
+
+#[get("/contests")]
+pub async fn get_contests(pool: Data<DbPool>) -> Result<Json<Vec<Contest>>, Error> {
+    const TARGET: &str = "GET /contests";
+    log::info!(target: TARGET, "Request received");
+
+    let conn = &mut web::block(move || pool.get()).await??;
+
+    let contests: Vec<Contest> = models::get_contests(conn)?
+        .into_iter()
+        .map(|c| c.into())
+        .collect();
+    log::info!(target: TARGET, "Request done");
+    Ok(Json(contests))
+}
+
+#[get("/contests/{id}")]
+pub async fn get_contest(id: Path<u32>, pool: Data<DbPool>) -> Result<Json<Contest>, Error> {
+    const TARGET: &str = "GET /contests/{id}";
+    log::info!(target: TARGET, "Request received");
+
+    let id = id.into_inner() as i32;
+
+    let conn = &mut web::block(move || pool.get()).await??;
+
+    let contest: Contest = models::get_contest(conn, id)
+        .map_err(|err| match err.reason {
+            Reason::NotFound => {
+                log::info!(target: TARGET, "No such contest: {id}");
+                Error::new(Reason::NotFound, format!("Contest {id} not found."))
+            }
+            _ => err,
+        })?
+        .into();
+    log::info!(target: TARGET, "Request done");
+    Ok(Json(contest))
 }
 
 #[derive(Deserialize)]
@@ -43,8 +167,8 @@ impl TieBreaker {
     /// Compare the ranking of two users
     pub fn compare(
         &self,
-        (id_a, a): &(i32, &HashMap<i32, ProblemResult>),
-        (id_b, b): &(i32, &HashMap<i32, ProblemResult>),
+        (id_a, a): &(u32, &HashMap<u32, ProblemResult>),
+        (id_b, b): &(u32, &HashMap<u32, ProblemResult>),
     ) -> Ordering {
         let total_score_a: f64 = a.values().map(|result| result.score).sum();
         let total_score_b: f64 = b.values().map(|result| result.score).sum();
@@ -77,7 +201,7 @@ impl TieBreaker {
                 let b: u32 = b.values().map(|x| x.submission_count).sum();
                 a.cmp(&b)
             }
-            TieBreaker::UserId => id_a.cmp(&id_b),
+            TieBreaker::UserId => id_a.cmp(id_b),
         }
     }
 }
@@ -103,16 +227,27 @@ pub struct ProblemResult {
     submission_count: u32,
 }
 
-#[get("/contests/0/ranklist")]
+#[get("/contests/{id}/ranklist")]
 pub async fn get_rank_list(
+    id: Path<u32>,
     rule: Query<RankingRule>,
     config: Data<Config>,
     pool: Data<DbPool>,
 ) -> Result<Json<Vec<RankingItem>>, Error> {
-    const TARGET: &str = "GET /contests/0/ranklist";
+    const TARGET: &str = "GET /contests/{id}/ranklist";
     log::info!(target: TARGET, "Request received");
 
     let conn = &mut web::block(move || pool.get()).await??;
+
+    let id = id.into_inner();
+
+    if id != 0 && !models::does_contest_exist(conn, id as i32)? {
+        log::info!(target: TARGET, "No such contest: {id}");
+        return Err(Error::new(
+            Reason::NotFound,
+            format!("Contest {id} not found."),
+        ));
+    }
 
     let RankingRule {
         scoring_rule,
@@ -122,56 +257,58 @@ pub async fn get_rank_list(
     let scoring_rule = scoring_rule.unwrap_or(ScoringRule::Latest);
     let tie_breaker = tie_breaker.unwrap_or(TieBreaker::Default);
 
-    // submissions[id] means the submissions for user 'id', and
-    // it is a hash map 'm' where m[p_id] means the user's score on problem 'p_id'
-    let user_count = models::user_count(conn)?;
-    let mut submissions: Vec<HashMap<i32, ProblemResult>> =
-        vec![HashMap::new(); user_count as usize];
+    let users: Vec<User>;
+    let problems: Vec<&Problem>;
 
-    let jobs = models::get_jobs(conn, Default::default())?;
-    for job in jobs {
-        let job: Job = job.into();
-        let user_id = job.submission.user_id;
-        let problem_id = job.submission.problem_id;
-        let score = job.score;
-        let submission_time = job.created_time;
+    if id == 0 {
+        users = models::get_users(conn)?;
+        problems = config.problems.iter().collect();
+    } else {
+        let contest: Contest = models::get_contest(conn, id as i32)?.into();
+        users =
+            models::get_some_users(conn, contest.user_ids.iter().map(|id| *id as i32).collect())?;
+        problems = contest
+            .problem_ids
+            .iter()
+            .filter_map(|id| config.get_problem(*id))
+            .collect();
+    }
 
-        // Fetch the problem results for a user
-        let problem_results = &mut submissions[user_id as usize];
-
-        // Set the problem results for each problem according to the scoring rule
-        problem_results
-            .entry(problem_id)
-            .and_modify(|result| {
-                result.submission_count += 1;
-                match scoring_rule {
-                    ScoringRule::Latest => {
-                        if submission_time > result.submission_time {
-                            result.score = score;
-                            result.submission_time = submission_time;
-                        }
-                    }
-                    ScoringRule::Highest => {
-                        if score > result.score {
-                            result.score = score;
-                            result.submission_time = submission_time;
-                        }
-                    }
+    let mut rank_list: Vec<(u32, HashMap<u32, ProblemResult>)> = vec![];
+    for user in &users {
+        let mut map = HashMap::<u32, ProblemResult>::new();
+        for problem in &problems {
+            // Fetch the problem result for a user
+            let result = match scoring_rule {
+                ScoringRule::Latest => {
+                    models::get_latest_submission(conn, user.id, problem.id as i32, id as i32)
                 }
-            })
-            .or_insert(ProblemResult {
-                score,
-                submission_time,
-                submission_count: 1,
-            });
+                ScoringRule::Highest => {
+                    models::get_highest_submission(conn, user.id, problem.id as i32, id as i32)
+                }
+            }?;
+            // No submission on this problem
+            if result.is_none() {
+                continue;
+            }
+            let job = result.unwrap();
+            let score = job.score;
+            let submission_time = job.created_time.and_local_timezone(Utc).unwrap();
+            let count =
+                models::get_submission_count(conn, user.id, problem.id as i32, id as i32)? as u32;
+            map.insert(
+                problem.id,
+                ProblemResult {
+                    score,
+                    submission_time,
+                    submission_count: count,
+                },
+            );
+        }
+        rank_list.push((user.id as u32, map));
     }
 
     // Ranking according to the tie breaker rule
-    let mut rank_list: Vec<_> = submissions
-        .iter()
-        .enumerate()
-        .map(|(k, v)| (k as i32, v))
-        .collect();
     rank_list.sort_by(|(id_a, a), (id_b, b)| {
         match tie_breaker.compare(&(*id_a, a), &(*id_b, b)) {
             // If equal, sort in ascending order by user id
@@ -186,28 +323,44 @@ pub async fn get_rank_list(
     for (rank, (user_id, _)) in rank_list.iter().enumerate() {
         let last_rank = response.last().map(|item| item.rank).unwrap_or_default();
         response.push(RankingItem {
-            user: models::get_user(conn, *user_id)?,
+            user: models::get_user(conn, *user_id as i32)?,
             // Calculate rank
             rank: if rank == 0 {
                 1
             } else {
                 // If the two users are ranked equal by the tie breaker rule,
                 // assign them the same ranking
-                if tie_breaker.compare(&rank_list[rank], &rank_list[rank - 1]) == Ordering::Equal {
+                if tie_breaker.compare(
+                    &(rank_list[rank].0, &rank_list[rank].1),
+                    &(rank_list[rank - 1].0, &rank_list[rank - 1].1),
+                ) == Ordering::Equal
+                {
                     last_rank
                 } else {
                     rank as u32 + 1
                 }
             },
-            scores: config
-                .problems
+            scores: problems
                 .iter()
                 .map(|p| {
                     // If no submissions on a problem are found, set the score to 0
-                    submissions[*user_id as usize]
-                        .get(&p.id)
-                        .map(|result| result.score)
-                        .unwrap_or_default()
+                    match scoring_rule {
+                        ScoringRule::Latest => models::get_latest_submission(
+                            conn,
+                            *user_id as i32,
+                            p.id as i32,
+                            id as i32,
+                        ),
+                        ScoringRule::Highest => models::get_highest_submission(
+                            conn,
+                            *user_id as i32,
+                            p.id as i32,
+                            id as i32,
+                        ),
+                    }
+                    .unwrap()
+                    .map(|s| s.score)
+                    .unwrap_or_default()
                 })
                 .collect(),
         })

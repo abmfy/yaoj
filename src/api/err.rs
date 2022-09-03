@@ -16,10 +16,10 @@ pub enum Reason {
     Internal,
 }
 
-impl Into<String> for Reason {
-    fn into(self) -> String {
+impl From<Reason> for String {
+    fn from(err: Reason) -> Self {
         "ERR_".to_string()
-            + match self {
+            + match err {
                 Reason::InvalidArgument => "INVALID_ARGUMENT",
                 Reason::InvalidState => "INVALID_STATE",
                 Reason::NotFound => "NOT_FOUND",
@@ -34,7 +34,7 @@ impl Into<String> for Reason {
 #[derive(Debug, Serialize)]
 pub struct Error {
     code: u32,
-    reason: Reason,
+    pub reason: Reason,
     message: String,
 }
 
@@ -59,22 +59,30 @@ impl Error {
 
 impl From<diesel::result::Error> for Error {
     fn from(err: diesel::result::Error) -> Self {
-        log::error!(target: "persistent", "Database error: {}", err);
-        Error::new(Reason::External, format!("Database error"))
+        match err {
+            diesel::result::Error::NotFound => {
+                log::info!(target: "persistent", "Not Found");
+                Error::new(Reason::NotFound, "Not Found".to_string())
+            }
+            _ => {
+                log::error!(target: "persistent", "Database error: {}", err);
+                Error::new(Reason::External, "Database error".to_string())
+            }
+        }
     }
 }
 
 impl From<r2d2::Error> for Error {
     fn from(err: r2d2::Error) -> Self {
         log::error!(target: "persistent", "Connection pool error: {}", err);
-        Error::new(Reason::External, format!("Database error"))
+        Error::new(Reason::External, "Database error".to_string())
     }
 }
 
 impl From<BlockingError> for Error {
     fn from(err: BlockingError) -> Self {
         log::error!(target: "persistent", "Blocking error: {}", err);
-        Error::new(Reason::External, format!("Database error"))
+        Error::new(Reason::External, "Database error".to_string())
     }
 }
 

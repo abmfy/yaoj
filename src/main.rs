@@ -10,8 +10,6 @@ use diesel::{
     Connection, SqliteConnection,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use env_logger;
-use log;
 
 mod api;
 mod config;
@@ -32,7 +30,7 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 async fn exit() -> impl Responder {
     log::info!("Shutdown as requested");
     std::process::exit(0);
-    format!("Exited")
+    "Exited".to_string()
 }
 
 #[actix_web::main]
@@ -80,6 +78,9 @@ async fn main() -> std::io::Result<()> {
             .service(api::jobs::rejudge_job)
             .service(api::users::update_user)
             .service(api::users::get_users)
+            .service(api::contests::update_contest)
+            .service(api::contests::get_contests)
+            .service(api::contests::get_contest)
             .service(api::contests::get_rank_list)
             // DO NOT REMOVE: used in automatic testing
             .service(exit)
