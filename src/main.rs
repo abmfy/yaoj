@@ -6,6 +6,7 @@ use actix_web::{
 };
 use clap::Parser;
 use diesel::{
+    connection::SimpleConnection,
     r2d2::{ConnectionManager, Pool},
     Connection, SqliteConnection,
 };
@@ -18,6 +19,7 @@ mod persistent;
 
 use api::err::{Error, Reason};
 use config::Args;
+use r2d2::CustomizeConnection;
 
 type DbPool = Pool<ConnectionManager<SqliteConnection>>;
 
@@ -31,6 +33,18 @@ async fn exit() -> impl Responder {
     log::info!("Shutdown as requested");
     std::process::exit(0);
     "Exited".to_string()
+}
+
+#[derive(Debug)]
+pub struct ConnectionOption;
+
+// Set busy timeout to avoid conflict writes to the database
+impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for ConnectionOption {
+    fn on_acquire(&self, conn: &mut SqliteConnection) -> Result<(), diesel::r2d2::Error> {
+        conn.batch_execute("PRAGMA busy_timeout = 30000")
+            .map_err(diesel::r2d2::Error::QueryError)?;
+        Ok(())
+    }
 }
 
 #[actix_web::main]
@@ -55,7 +69,11 @@ async fn main() -> std::io::Result<()> {
 
     // Create connection pool
     let manager = ConnectionManager::<SqliteConnection>::new(DB_URL);
-    let pool = Pool::new(manager).expect("Failed to create database pool");
+    let pool = Pool::builder()
+        .max_size(16)
+        .connection_customizer(Box::new(ConnectionOption))
+        .build(manager)
+        .expect("Failed to create connection pool");
 
     // Config parameter extractor so that we return a unified JSON response when argument is invalid
     let query_cfg = QueryConfig::default()
