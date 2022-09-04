@@ -1,19 +1,17 @@
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use temp_dir::TempDir;
 use wait_timeout::ChildExt;
 
-use crate::api::jobs::{CaseResult, JobResult};
+use crate::api::jobs::{CaseResult, Job, JobResult, JobStatus};
 use crate::config::{Language, Problem, ProblemType};
-
-pub struct JudgeResult {
-    pub result: JobResult,
-    pub score: f64,
-    pub cases: Vec<CaseResult>,
-}
+use crate::persistent::models;
+use crate::DbPool;
 
 /// Auxiliary function for reading from a file
 fn read(mut f: File) -> Result<String, io::Error> {
@@ -37,15 +35,25 @@ fn trim(f: File) -> Result<String, io::Error> {
     Ok(result)
 }
 
-/// Judge given code and return the result
-pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
-    const TARGET: &str = "judge";
+/// Judge given code and update the result in real time
+pub fn judge(pool: Arc<DbPool>, code: &str, lang: &Language, problem: &Problem, mut job: Job) {
+    let target = &format!("judge@job{}", job.id);
     log::info!(
-        target: TARGET,
+        target: target,
         "New judge task started, lang: {}, problem id: {}",
         lang.name,
         problem.id
     );
+
+    let conn = &mut pool.get().unwrap();
+
+    // Push update to database
+    macro_rules! push {
+        () => {
+            job.updated_time = Utc::now();
+            models::update_job(conn, job.clone().into()).unwrap();
+        };
+    }
 
     // Create a temp directory for use
     let dir = TempDir::new().unwrap();
@@ -70,78 +78,68 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
 
     // Compile
     let now = Instant::now();
+    job.state = JobStatus::Running;
+    push!();
+
     let result = Command::new(args[0]).args(args.iter().skip(1)).status();
 
     // Compilation error
     if result.is_err() || !result.unwrap().success() {
-        log::info!(target: TARGET, "Compilation error");
-        let mut results = vec![CaseResult {
+        log::info!(target: target, "Compilation error");
+        job = Job {
+            state: JobStatus::Finished,
+            result: JobResult::CompilationError,
+            ..job
+        };
+        job.cases[0] = CaseResult {
             id: 0,
             result: JobResult::CompilationError,
             time: now.elapsed().as_micros() as u32,
             memory: 0,
-        }];
-        for i in 1..=problem.cases.len() {
-            results.push(CaseResult {
-                id: i as u32,
-                result: JobResult::Waiting,
-                time: 0,
-                memory: 0,
-            });
-        }
-        return JudgeResult {
-            result: JobResult::CompilationError,
-            score: 0.0,
-            cases: results,
         };
+        push!();
+        return;
     }
 
     // Compilation success
-
-    // Judge results
-    let mut score = 0.0;
-    let mut result_type: JobResult = JobResult::Accepted;
-    let mut results = vec![CaseResult {
+    job.cases[0] = CaseResult {
         id: 0,
         result: JobResult::CompilationSuccess,
         time: now.elapsed().as_micros() as u32,
         memory: 0,
-    }];
+    };
+    push!();
+
+    // Intermediate job result
+    let mut job_result = JobResult::Accepted;
 
     // Judge
-    for case in problem.cases.iter() {
-        let id = results.len() as u32;
-        // Auxiliary function for reporting an system error
-        fn system_error(results: &mut Vec<CaseResult>) {
-            results.push(CaseResult {
-                id: results.len() as u32,
-                result: JobResult::SystemError,
-                time: 0,
-                memory: 0,
-            });
+    for (id, case) in problem.cases.iter().enumerate() {
+        let id = id as u32 + 1;
+        let case_result = &mut job.cases[id as usize];
+
+        // Auxiliary macro for reporting an system error
+        macro_rules! system_error {
+            ($($x:tt)+) => {
+                log::error!(target: target, $($x)+);
+                if job_result == JobResult::Accepted {
+                    job_result = JobResult::SystemError;
+                }
+                case_result.result = JobResult::SystemError;
+                push!();
+                continue;
+            };
         }
 
         let input = File::open(case.input_file.clone());
-        let output = File::create(dir.child("output"));
+        let output = File::create(dir.child(".output"));
 
         // Unable to open file
         if input.is_err() {
-            log::error!(
-                target: TARGET,
-                "Unable to open input file: {}",
-                input.unwrap_err()
-            );
-            system_error(&mut results);
-            continue;
+            system_error!("Unable to open input file: {}", input.unwrap_err());
         }
         if output.is_err() {
-            log::error!(
-                target: TARGET,
-                "Unable to open output file: {}",
-                output.unwrap_err()
-            );
-            system_error(&mut results);
-            continue;
+            system_error!("Unable to open output file: {}", output.unwrap_err());
         }
 
         // Child process
@@ -152,32 +150,29 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
 
         // Unable to spawn process
         if child.is_err() {
-            log::error!(
-                target: TARGET,
-                "Unable to spawn process: {}",
-                child.unwrap_err()
-            );
-            system_error(&mut results);
-            continue;
+            system_error!("Unable to spawn process: {}", child.unwrap_err());
         }
 
         let mut child = child.unwrap();
 
         let now = Instant::now();
 
-        // Auxiliary function for inserting a new result
-        let mut update_result = |result: JobResult, time: u32| {
-            // Record first non-accepted result
-            if result != JobResult::Accepted && result_type == JobResult::Accepted {
-                result_type = result;
-            }
-            results.push(CaseResult {
-                id,
-                result,
-                time,
-                memory: 0,
-            });
-        };
+        // Auxiliary macro for updating results
+        macro_rules! update_result {
+            ($result: expr, $($x:tt)+) => {
+                log::info!(target: target, $($x)+);
+
+                // Record first non-accepted result
+                if $result != JobResult::Accepted && job_result == JobResult::Accepted {
+                    job_result = $result;
+                }
+                case_result.result = $result;
+                case_result.time = now.elapsed().as_micros() as u32;
+
+                push!();
+                continue;
+            };
+        }
 
         // Wait for the process to finish and check status code
         match child.wait_timeout(if case.time_limit != 0 {
@@ -188,156 +183,84 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
             Ok(Some(status)) => {
                 // Exited, but with an error
                 if !status.success() {
-                    log::info!(target: TARGET, "Test case {id}: Runtime error");
-                    update_result(JobResult::RuntimeError, 0);
-                    continue;
+                    update_result!(JobResult::RuntimeError, "Test case {id}: Runtime error");
                 }
             }
             // Child hasn't exited yet
             Ok(None) => {
                 match child.kill() {
                     Ok(_) => {
-                        log::info!(target: TARGET, "Test case {id}: Time limit exceeded");
-                        update_result(
+                        update_result!(
                             JobResult::TimeLimitExceeded,
-                            now.elapsed().as_micros() as u32,
+                            "Test case {id}: Time limit exceeded"
                         );
                     }
                     Err(err) => {
-                        log::error!(target: TARGET, "Unable to kill child process: {}", err);
-                        system_error(&mut results);
+                        system_error!("Unable to kill child process: {}", err);
                     }
                 };
-                continue;
             }
             // Unknown error
             Err(err) => {
                 let _ = child.kill();
-                log::error!(
-                    target: TARGET,
-                    "Unknown error when executing program: {}",
-                    err
-                );
-                system_error(&mut results);
-                continue;
+                system_error!("Unknown error when executing program: {}", err);
             }
         };
 
-        let time = now.elapsed().as_micros() as u32;
-
         // Check if time limit exceeded
-        if case.time_limit != 0 && time > case.time_limit as u32 {
-            log::info!(target: TARGET, "Test case {id}: Time limit exceeded");
-            update_result(JobResult::TimeLimitExceeded, time);
-            continue;
+        if case.time_limit != 0 && now.elapsed().as_micros() as u32 > case.time_limit {
+            update_result!(
+                JobResult::TimeLimitExceeded,
+                "Test case {id}: Time limit exceeded"
+            );
         }
 
         // Open the output file again
-        let output = File::open(dir.child("output"));
+        let output = File::open(dir.child(".output"));
         if output.is_err() {
-            log::error!(
-                target: TARGET,
-                "Unable to open output file: {}",
-                output.unwrap_err()
-            );
-            system_error(&mut results);
-            continue;
+            system_error!("Unable to open output file: {}", output.unwrap_err());
         }
         let output = output.unwrap();
 
         // Open the answer file
         let answer = File::open(case.answer_file.clone());
         if answer.is_err() {
-            log::error!(
-                target: TARGET,
-                "Unable to open answer file: {}",
-                answer.unwrap_err()
-            );
-            system_error(&mut results);
-            continue;
+            system_error!("Unable to open answer file: {}", answer.unwrap_err());
         }
         let answer = answer.unwrap();
 
         // Now we are sure that the process exited successfully
         // Check the output
-        match problem.typ {
-            ProblemType::Standard => {
-                let output = trim(output);
-                if output.is_err() {
-                    log::error!(
-                        target: TARGET,
-                        "Unable to read from output file: {}",
-                        output.unwrap_err()
-                    );
-                    system_error(&mut results);
-                    continue;
-                }
-                let answer = trim(answer);
-                if output.is_err() {
-                    log::error!(
-                        target: TARGET,
-                        "Unable to read from answer file: {}",
-                        answer.unwrap_err()
-                    );
-                    system_error(&mut results);
-                    continue;
-                }
-                let output = output.unwrap();
-                let answer = answer.unwrap();
-
-                if output == answer {
-                    log::info!(target: TARGET, "Test case {id}: Accepted");
-                    score += case.score;
-                    update_result(JobResult::Accepted, time);
-                } else {
-                    log::info!(target: TARGET, "Test case {id}: Wrong Answer");
-                    log::info!(target: TARGET, "Output: {output}*EOF*");
-                    log::info!(target: TARGET, "Answer: {answer}*EOF*");
-                    update_result(JobResult::WrongAnswer, time);
-                }
+        let (output, answer) = match problem.typ {
+            ProblemType::Standard => (trim(output), trim(answer)),
+            ProblemType::Strict => (read(output), read(answer)),
+            _ => {
+                system_error!("Unimplemented problem type");
             }
-            ProblemType::Strict => {
-                let output = read(output);
-                if output.is_err() {
-                    log::error!(
-                        target: TARGET,
-                        "Unable to read from output file: {}",
-                        output.unwrap_err()
-                    );
-                    system_error(&mut results);
-                    continue;
-                }
-                let answer = read(answer);
-                if output.is_err() {
-                    log::error!(
-                        target: TARGET,
-                        "Unable to read from answer file: {}",
-                        answer.unwrap_err()
-                    );
-                    system_error(&mut results);
-                    continue;
-                }
-                let output = output.unwrap();
-                let answer = answer.unwrap();
+        };
 
-                if output == answer {
-                    log::info!(target: TARGET, "Test case {id}: Accepted");
-                    score += case.score;
-                    update_result(JobResult::Accepted, time);
-                } else {
-                    log::info!(target: TARGET, "Test case {id}: Wrong Answer");
-                    log::info!(target: TARGET, "Output: {output}*EOF*");
-                    log::info!(target: TARGET, "Answer: {answer}*EOF*");
-                    update_result(JobResult::WrongAnswer, time);
-                }
-            }
-            _ => unimplemented!(),
+        if output.is_err() {
+            system_error!("Unable to read from output file: {}", output.unwrap_err());
+        }
+        if answer.is_err() {
+            system_error!("Unable to read from answer file: {}", answer.unwrap_err());
+        }
+
+        let (output, answer) = (output.unwrap(), answer.unwrap());
+
+        if output == answer {
+            job.score += case.score;
+            update_result!(JobResult::Accepted, "Test case {id}: Accepted");
+        } else {
+            log::info!(target: target, "Output: {output}*EOF*");
+            log::info!(target: target, "Answer: {answer}*EOF*");
+            update_result!(JobResult::WrongAnswer, "Test case {id}: Wrong Answer");
         }
     }
 
-    JudgeResult {
-        result: result_type,
-        score,
-        cases: results,
-    }
+    job.state = JobStatus::Finished;
+    job.result = job_result;
+    push!();
+
+    log::info!(target: target, "Judging ended");
 }

@@ -27,8 +27,8 @@ pub struct Case {
     pub score: f64,
     pub input_file: PathBuf,
     pub answer_file: PathBuf,
-    pub time_limit: i32,
-    pub memory_limit: i32,
+    pub time_limit: u32,
+    pub memory_limit: u32,
 }
 
 /// Problem type

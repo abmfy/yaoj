@@ -205,7 +205,8 @@ pub async fn new_job(
     const TARGET: &str = "POST /jobs";
     log::info!(target: TARGET, "Request received");
 
-    let conn = &mut web::block(move || pool.get()).await??;
+    let pool_cloned = pool.clone();
+    let conn = &mut web::block(move || pool_cloned.get()).await??;
 
     match config.get_lang(&submission.language) {
         None => {
@@ -289,47 +290,43 @@ pub async fn new_job(
                         }
                     }
 
-                    let created = Utc::now().naive_utc();
+                    let created = Utc::now();
 
-                    // Add the job to the jobs list with Running status
-                    let job = models::Job {
-                        id: models::jobs_count(conn)?,
+                    // Add the job to the jobs list with Queueing status
+                    let job = Job {
+                        id: models::jobs_count(conn)? as u32,
                         created_time: created,
                         updated_time: created,
-                        source_code: submission.source_code.clone(),
-                        lang: submission.language.clone(),
-                        user_id: submission.user_id as i32,
-                        contest_id: submission.contest_id as i32,
-                        problem_id: submission.problem_id as i32,
-                        job_state: JobStatus::Running,
+                        submission: submission.clone(),
+                        state: JobStatus::Queueing,
                         result: JobResult::Waiting,
                         score: 0.0,
-                        cases: CaseResults(vec![]),
+                        cases: (0..=problem.cases.len())
+                            .map(|id| CaseResult {
+                                id: id as u32,
+                                result: JobResult::Waiting,
+                                time: 0,
+                                memory: 0,
+                            })
+                            .collect(),
                     };
-                    let job_id = models::new_job(conn, job.clone())?.id;
+                    let job_id = models::new_job(conn, job.clone().into())?.id;
                     log::info!(target: TARGET, "Job {} created", job_id);
 
-                    log::info!(target: TARGET, "Judging started");
+                    // Start a new thread to judge and update job status
+                    log::info!(target: TARGET, "Judging detached");
                     let (code, lang, problem) = (
                         submission.source_code.clone(),
                         lang.clone(),
                         problem.clone(),
                     );
-                    let result = web::block(move || judge(&code, &lang, &problem)).await?;
-                    log::info!(target: TARGET, "Judging ended, result: {:?}", result.result);
-                    // Add the job to the jobs list
-                    let job = models::Job {
-                        updated_time: Utc::now().naive_utc(),
-                        job_state: JobStatus::Finished,
-                        result: result.result,
-                        score: result.score,
-                        cases: CaseResults(result.cases),
-                        ..job
-                    };
-                    let job = models::update_job(conn, job)?;
-                    log::info!(target: TARGET, "Job {} added", job_id);
+                    let job_cloned = job.clone();
+                    let _ = web::block(move || {
+                        judge(pool.into_inner(), &code, &lang, &problem, job_cloned)
+                    });
+
                     log::info!(target: TARGET, "Request done");
-                    Ok(Json(job.into()))
+                    Ok(Json(job))
                 }
             }
         }
@@ -382,7 +379,8 @@ pub async fn rejudge_job(
     const TARGET: &str = "PUT /jobs/{id}";
     log::info!(target: TARGET, "Request received");
 
-    let conn = &mut web::block(move || pool.get()).await??;
+    let pool_cloned = pool.clone();
+    let conn = &mut web::block(move || pool_cloned.get()).await??;
 
     let id = id.into_inner();
     let job_exists = models::does_job_exist(conn, id)?;
@@ -394,12 +392,12 @@ pub async fn rejudge_job(
         ))
     } else {
         // Guard that the job is in Finished state
-        let job = models::get_job(conn, id)?;
-        if job.job_state != JobStatus::Finished {
+        let job: Job = models::get_job(conn, id)?.into();
+        if job.state != JobStatus::Finished {
             log::info!(
                 target: TARGET,
                 "Job {id} not finished: it's in {:?} state",
-                job.job_state
+                job.state
             );
             return Err(Error::new(
                 Reason::InvalidState,
@@ -407,21 +405,26 @@ pub async fn rejudge_job(
             ));
         }
 
-        // Modify the state to be running
-        let job: Job = models::update_job(
-            conn,
-            models::Job {
-                updated_time: Utc::now().naive_utc(),
-                job_state: JobStatus::Running,
-                result: JobResult::Waiting,
-                score: 0.0,
-                cases: CaseResults(vec![]),
-                ..job
-            },
-        )?
-        .into();
+        // Modify the state to be queueing
+        let job = Job {
+            updated_time: Utc::now(),
+            state: JobStatus::Queueing,
+            result: JobResult::Waiting,
+            score: 0.0,
+            cases: (0..job.cases.len())
+                .map(|id| CaseResult {
+                    id: id as u32,
+                    result: JobResult::Waiting,
+                    time: 0,
+                    memory: 0,
+                })
+                .collect(),
+            ..job
+        };
+        models::update_job(conn, job.clone().into())?;
 
-        log::info!(target: TARGET, "Judging started");
+        // Start a new thread to judge and update job status
+        log::info!(target: TARGET, "Judging detached");
         let (code, lang, problem) = (
             job.submission.source_code.clone(),
             config.get_lang(&job.submission.language).unwrap().clone(),
@@ -430,21 +433,10 @@ pub async fn rejudge_job(
                 .unwrap()
                 .clone(),
         );
-        let result = web::block(move || judge(&code, &lang, &problem)).await?;
-        log::info!(target: TARGET, "Judging ended, result: {:?}", result.result);
+        let job_cloned = job.clone();
+        let _ = web::block(move || judge(pool.into_inner(), &code, &lang, &problem, job_cloned));
 
-        // Update the job
-        let job = models::Job {
-            updated_time: Utc::now().naive_utc(),
-            job_state: JobStatus::Finished,
-            result: result.result,
-            score: result.score,
-            cases: CaseResults(result.cases),
-            ..job.into()
-        };
-        let job = models::update_job(conn, job)?;
-        log::info!(target: TARGET, "Job {} updated", id);
         log::info!(target: TARGET, "Request done");
-        Ok(Json(job.into()))
+        Ok(Json(job))
     }
 }
