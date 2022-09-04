@@ -310,7 +310,12 @@ pub async fn new_job(
                     log::info!(target: TARGET, "Job {} created", job_id);
 
                     log::info!(target: TARGET, "Judging started");
-                    let result = judge(&submission.source_code, lang, problem);
+                    let (code, lang, problem) = (
+                        submission.source_code.clone(),
+                        lang.clone(),
+                        problem.clone(),
+                    );
+                    let result = web::block(move || judge(&code, &lang, &problem)).await?;
                     log::info!(target: TARGET, "Judging ended, result: {:?}", result.result);
                     // Add the job to the jobs list
                     let job = models::Job {
@@ -417,11 +422,15 @@ pub async fn rejudge_job(
         .into();
 
         log::info!(target: TARGET, "Judging started");
-        let result = judge(
-            &job.submission.source_code,
-            config.get_lang(&job.submission.language).unwrap(),
-            config.get_problem(job.submission.problem_id).unwrap(),
+        let (code, lang, problem) = (
+            job.submission.source_code.clone(),
+            config.get_lang(&job.submission.language).unwrap().clone(),
+            config
+                .get_problem(job.submission.problem_id)
+                .unwrap()
+                .clone(),
         );
+        let result = web::block(move || judge(&code, &lang, &problem)).await?;
         log::info!(target: TARGET, "Judging ended, result: {:?}", result.result);
 
         // Update the job
