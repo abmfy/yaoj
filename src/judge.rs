@@ -180,9 +180,11 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
         };
 
         // Wait for the process to finish and check status code
-        match child.wait_timeout(
-            Duration::from_micros(case.time_limit as u64) + Duration::from_millis(500),
-        ) {
+        match child.wait_timeout(if case.time_limit != 0 {
+            Duration::from_micros(case.time_limit as u64) + Duration::from_millis(500)
+        } else {
+            Duration::MAX
+        }) {
             Ok(Some(status)) => {
                 // Exited, but with an error
                 if !status.success() {
@@ -224,7 +226,7 @@ pub fn judge(code: &str, lang: &Language, problem: &Problem) -> JudgeResult {
         let time = now.elapsed().as_micros() as u32;
 
         // Check if time limit exceeded
-        if time > case.time_limit as u32 {
+        if case.time_limit != 0 && time > case.time_limit as u32 {
             log::info!(target: TARGET, "Test case {id}: Time limit exceeded");
             update_result(JobResult::TimeLimitExceeded, time);
             continue;
