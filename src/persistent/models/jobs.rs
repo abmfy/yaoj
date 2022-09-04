@@ -81,9 +81,10 @@ pub fn jobs_count(conn: &mut SqliteConnection) -> Result<i32, Error> {
 pub fn new_job(conn: &mut SqliteConnection, job_form: Job) -> Result<Job, Error> {
     use self::jobs::dsl::*;
 
-    Ok(diesel::insert_into(jobs)
-        .values(job_form)
-        .get_result(conn)?)
+    diesel::insert_into(jobs)
+        .values(job_form.clone())
+        .execute(conn)?;
+    Ok(job_form)
 }
 
 /// Get specific job

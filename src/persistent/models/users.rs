@@ -74,9 +74,10 @@ pub fn update_user(conn: &mut SqliteConnection, user_form: UserForm) -> Result<U
     if let Some(uid) = uid {
         let user: Option<User> = users.find(uid).first(conn).optional()?;
         if user.is_some() {
-            Ok(diesel::update(users.find(uid))
+            diesel::update(users.find(uid))
                 .set(user_name.eq(name))
-                .get_result(conn)?)
+                .execute(conn)?;
+            Ok(users.find(uid).get_result(conn)?)
         } else {
             Err(Error::new(
                 Reason::NotFound,
@@ -85,9 +86,8 @@ pub fn update_user(conn: &mut SqliteConnection, user_form: UserForm) -> Result<U
         }
     } else {
         // Insert mode
-        Ok(diesel::insert_into(users)
-            .values(user_form)
-            .get_result(conn)?)
+        diesel::insert_into(users).values(user_form).execute(conn)?;
+        Ok(users.order(id.desc()).first(conn)?)
     }
 }
 

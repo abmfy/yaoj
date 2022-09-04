@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::api::err::{Error, Reason};
 use crate::persistent::schema::contests;
 
-#[derive(Serialize, Queryable, Insertable, AsChangeset, Identifiable)]
+#[derive(Clone, Serialize, Queryable, Insertable, AsChangeset, Identifiable)]
 pub struct Contest {
     pub id: i32,
     pub contest_name: String,
@@ -81,7 +81,10 @@ pub fn get_contests(conn: &mut SqliteConnection) -> Result<Vec<Contest>, Error> 
 pub fn new_contest(conn: &mut SqliteConnection, con: Contest) -> Result<Contest, Error> {
     use self::contests::dsl::*;
 
-    Ok(diesel::insert_into(contests).values(con).get_result(conn)?)
+    diesel::insert_into(contests)
+        .values(con.clone())
+        .execute(conn)?;
+    Ok(con)
 }
 
 pub fn update_contest(conn: &mut SqliteConnection, con: Contest) -> Result<Contest, Error> {
