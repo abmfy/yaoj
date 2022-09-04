@@ -165,7 +165,7 @@ pub fn get_highest_submission(
         .filter(user_id.eq(uid))
         .filter(problem_id.eq(pid))
         .filter(contest_id.eq(cid))
-        .order(score.desc())
+        .order((score.desc(), created_time))
         .first(conn)
         .optional()?)
 }
