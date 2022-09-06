@@ -137,6 +137,7 @@ async fn main() -> std::io::Result<()> {
             .service(api::jobs::get_jobs)
             .service(api::jobs::get_job)
             .service(api::jobs::rejudge_job)
+            .service(api::jobs::cancel_job)
             .service(api::users::update_user)
             .service(api::users::get_users)
             .service(api::contests::update_contest)

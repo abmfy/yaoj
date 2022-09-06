@@ -43,6 +43,13 @@ pub fn judge(conn: &mut SqliteConnection, config: &Config, name: &str, jid: i32)
     let target = &format!("{name}@job{jid}");
 
     let mut job: Job = models::get_job(conn, jid).unwrap().into();
+
+    // Job canceled
+    if job.state == JobStatus::Canceled {
+        log::info!(target: target, "Job cancelled");
+        return;
+    }
+
     let code = &job.submission.source_code;
     let lang = config.get_lang(&job.submission.language).unwrap();
     let problem = config.get_problem(job.submission.problem_id).unwrap();

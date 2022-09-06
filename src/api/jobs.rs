@@ -1,6 +1,7 @@
 use actix_web::{
-    get, post, put,
+    delete, get, post, put,
     web::{self, Data, Json, Path, Query},
+    HttpResponse,
 };
 use amiquip::{Channel, Exchange, Publish};
 use chrono::{DateTime, Utc};
@@ -436,4 +437,29 @@ pub async fn rejudge_job(
         log::info!(target: TARGET, "Request done");
         Ok(Json(job))
     }
+}
+
+#[delete("/jobs/{id}")]
+pub async fn cancel_job(id: Path<i32>, pool: Data<DbPool>) -> Result<HttpResponse, Error> {
+    const TARGET: &str = "DELETE /jobs/{id}";
+    log::info!(target: TARGET, "Request received");
+
+    let id = id.into_inner();
+
+    let pool = pool.into_inner();
+    let conn = &mut web::block(move || pool.get()).await??;
+
+    let mut job: Job = models::get_job(conn, id)?.into();
+    if job.state != JobStatus::Queueing {
+        return Err(Error::new(
+            Reason::InvalidState,
+            format!("Job {id} not queueing."),
+        ));
+    }
+
+    job.state = JobStatus::Canceled;
+    models::update_job(conn, job.into())?;
+
+    log::info!(target: TARGET, "Request done");
+    Ok(HttpResponse::Ok().finish())
 }
