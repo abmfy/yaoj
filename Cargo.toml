@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 actix-web = "4.1.0"
+amiquip = "0.4.2"
 chrono = { version = "0.4.22", features = ["serde"] }
 clap = { version = "3.2.18", features = ["derive"] }
 diesel = { version = "2.0.0", features = ["sqlite", "chrono", "serde_json", "r2d2"] }

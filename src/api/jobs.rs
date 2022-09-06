@@ -2,6 +2,7 @@ use actix_web::{
     get, post, put,
     web::{self, Data, Json, Path, Query},
 };
+use amiquip::{Channel, Exchange, Publish};
 use chrono::{DateTime, Utc};
 use diesel::{
     backend::{self, Backend},
@@ -21,7 +22,7 @@ use super::{
 
 use crate::{persistent::models, DbPool};
 
-use crate::{config::Config, judge::judge};
+use crate::config::Config;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Submission {
@@ -195,12 +196,25 @@ impl From<models::Job> for Job {
     }
 }
 
+/// Queue a judge job
+fn queue_job(id: i32, channel: &Channel) -> Result<(), Error> {
+    let exchange = Exchange::direct(channel);
+
+    exchange
+        .publish(Publish::new(&id.to_ne_bytes(), "judger"))
+        .map_err(|err| {
+            log::error!(target: "queue_job", "Failed to publish message: {err}");
+            Error::new(Reason::External, "Message queue error".to_string())
+        })
+}
+
 #[post("/jobs")]
 /// Create a new submission
 pub async fn new_job(
     submission: Json<Submission>,
     config: Data<Config>,
     pool: Data<DbPool>,
+    amqp_channel: Data<Channel>,
 ) -> Result<Json<Job>, Error> {
     const TARGET: &str = "POST /jobs";
     log::info!(target: TARGET, "Request received");
@@ -216,7 +230,7 @@ pub async fn new_job(
                 format!("No such language: {}", submission.language),
             ))
         }
-        Some(lang) => {
+        Some(_) => {
             match config.get_problem(submission.problem_id) {
                 None => {
                     log::info!(target: TARGET, "No such problem: {}", submission.problem_id);
@@ -315,15 +329,7 @@ pub async fn new_job(
 
                     // Start a new thread to judge and update job status
                     log::info!(target: TARGET, "Judging detached");
-                    let (code, lang, problem) = (
-                        submission.source_code.clone(),
-                        lang.clone(),
-                        problem.clone(),
-                    );
-                    let job_cloned = job.clone();
-                    let _ = web::block(move || {
-                        judge(pool.into_inner(), &code, &lang, &problem, job_cloned)
-                    });
+                    queue_job(job_id, &amqp_channel)?;
 
                     log::info!(target: TARGET, "Request done");
                     Ok(Json(job))
@@ -373,8 +379,8 @@ pub async fn get_job(id: Path<i32>, pool: Data<DbPool>) -> Result<Json<Job>, Err
 #[put("/jobs/{id}")]
 pub async fn rejudge_job(
     id: Path<i32>,
-    config: Data<Config>,
     pool: Data<DbPool>,
+    amqp_channel: Data<Channel>,
 ) -> Result<Json<Job>, Error> {
     const TARGET: &str = "PUT /jobs/{id}";
     log::info!(target: TARGET, "Request received");
@@ -425,16 +431,7 @@ pub async fn rejudge_job(
 
         // Start a new thread to judge and update job status
         log::info!(target: TARGET, "Judging detached");
-        let (code, lang, problem) = (
-            job.submission.source_code.clone(),
-            config.get_lang(&job.submission.language).unwrap().clone(),
-            config
-                .get_problem(job.submission.problem_id)
-                .unwrap()
-                .clone(),
-        );
-        let job_cloned = job.clone();
-        let _ = web::block(move || judge(pool.into_inner(), &code, &lang, &problem, job_cloned));
+        queue_job(id, &amqp_channel)?;
 
         log::info!(target: TARGET, "Request done");
         Ok(Json(job))

@@ -85,16 +85,21 @@ impl Config {
 pub struct Args {
     /// Path of the configuration file in JSON format
     #[clap(short, long, value_parser = parse_config)]
-    pub config: Config,
+    pub config: (String, Config),
 
     /// Whether to flush persistent data
     #[clap(short, long)]
     pub flush_data: bool,
+
+    /// Run this process as judger process with given id
+    #[clap(short, long)]
+    pub judger: Option<i32>,
 }
 
-fn parse_config(path: &str) -> Result<Config, std::io::Error> {
+fn parse_config(path: &str) -> Result<(String, Config), std::io::Error> {
+    let path_str = path.to_string();
     let path = PathBuf::from(path);
     let file = File::open(path)?;
     let config: Config = serde_json::from_reader(file)?;
-    Ok(config)
+    Ok((path_str, config))
 }

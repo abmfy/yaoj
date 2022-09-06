@@ -1,17 +1,20 @@
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::process::Command;
-use std::sync::Arc;
+use std::process::{self, Command};
 use std::time::{Duration, Instant};
 
+use amiquip::{
+    Connection as AmqpConnection, ConsumerMessage, ConsumerOptions, QueueDeclareOptions,
+};
 use chrono::Utc;
+use diesel::connection::SimpleConnection;
+use diesel::prelude::*;
 use temp_dir::TempDir;
 use wait_timeout::ChildExt;
 
 use crate::api::jobs::{CaseResult, Job, JobResult, JobStatus};
-use crate::config::{Language, Problem, ProblemType};
+use crate::config::{Config, ProblemType};
 use crate::persistent::models;
-use crate::DbPool;
 
 /// Auxiliary function for reading from a file
 fn read(mut f: File) -> Result<String, io::Error> {
@@ -36,8 +39,13 @@ fn trim(f: File) -> Result<String, io::Error> {
 }
 
 /// Judge given code and update the result in real time
-pub fn judge(pool: Arc<DbPool>, code: &str, lang: &Language, problem: &Problem, mut job: Job) {
-    let target = &format!("judge@job{}", job.id);
+pub fn judge(conn: &mut SqliteConnection, config: &Config, name: &str, jid: i32) {
+    let target = &format!("{name}@job{jid}");
+
+    let mut job: Job = models::get_job(conn, jid).unwrap().into();
+    let code = &job.submission.source_code;
+    let lang = config.get_lang(&job.submission.language).unwrap();
+    let problem = config.get_problem(job.submission.problem_id).unwrap();
     log::info!(
         target: target,
         "New judge task started, lang: {}, problem id: {}",
@@ -45,13 +53,14 @@ pub fn judge(pool: Arc<DbPool>, code: &str, lang: &Language, problem: &Problem, 
         problem.id
     );
 
-    let conn = &mut pool.get().unwrap();
-
     // Push update to database
     macro_rules! push {
         () => {
             job.updated_time = Utc::now();
-            models::update_job(conn, job.clone().into()).unwrap();
+            if let Err(err) = models::update_job(conn, job.clone().into()) {
+                log::error!(target: target, "Exiting due to err: {err}");
+                process::exit(0);
+            }
         };
     }
 
@@ -263,4 +272,54 @@ pub fn judge(pool: Arc<DbPool>, code: &str, lang: &Language, problem: &Problem, 
     push!();
 
     log::info!(target: target, "Judging ended");
+}
+
+pub fn main(id: i32, config: Config) {
+    let sql_connection =
+        &mut SqliteConnection::establish(super::DB_URL).expect("Unable to connect to database");
+    sql_connection
+        .batch_execute(super::DB_BUSY_TIMEOUT)
+        .expect("Failed to set database busy timeout");
+
+    let mut amqp_connection =
+        AmqpConnection::insecure_open(super::MQ_URL).expect("Failed to connect to RabbitMQ server");
+
+    let channel = amqp_connection
+        .open_channel(None)
+        .expect("Failed to open amqp channel");
+
+    // Enable load balance
+    channel
+        .qos(0, 1, false)
+        .expect("Failed to enable load balance");
+
+    let queue = channel
+        .queue_declare("judger", QueueDeclareOptions::default())
+        .expect("Failed to create queue");
+
+    let consumer = queue
+        .consume(ConsumerOptions::default())
+        .expect("Failed to create consumer");
+
+    let name = format!("judger{id}");
+    log::info!(target: &name, "Judger process started");
+
+    for message in consumer.receiver() {
+        match message {
+            ConsumerMessage::Delivery(delivery) => {
+                let mut bytes = [0; 4];
+                bytes.clone_from_slice(&delivery.body);
+                let jid = i32::from_ne_bytes(bytes);
+                judge(sql_connection, &config, &name, jid);
+
+                consumer
+                    .ack(delivery)
+                    .expect("Unable to acknowledge delivery");
+            }
+            _ => {
+                log::info!(target: &name, "Consumer ended");
+                break;
+            }
+        }
+    }
 }

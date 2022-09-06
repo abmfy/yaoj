@@ -1,3 +1,9 @@
+use std::{
+    process::Command,
+    sync::{Arc, Mutex},
+    thread,
+};
+
 use actix_web::{
     middleware::Logger,
     post,
@@ -24,6 +30,8 @@ use r2d2::CustomizeConnection;
 type DbPool = Pool<ConnectionManager<SqliteConnection>>;
 
 const DB_URL: &str = "oj.db";
+const DB_BUSY_TIMEOUT: &str = "PRAGMA busy_timeout = 30000";
+const MQ_URL: &str = "amqp://localhost:5672";
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 // DO NOT REMOVE: used in automatic testing
@@ -41,7 +49,7 @@ pub struct ConnectionOption;
 // Set busy timeout to avoid conflict writes to the database
 impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for ConnectionOption {
     fn on_acquire(&self, conn: &mut SqliteConnection) -> Result<(), diesel::r2d2::Error> {
-        conn.batch_execute("PRAGMA busy_timeout = 30000")
+        conn.batch_execute(DB_BUSY_TIMEOUT)
             .map_err(diesel::r2d2::Error::QueryError)?;
         Ok(())
     }
@@ -52,7 +60,18 @@ async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
     let args = Args::parse();
-    let config = args.config.clone();
+    let (config_path, config) = args.config.clone();
+
+    // Independent judger process
+    if let Some(id) = args.judger {
+        judge::main(id, config);
+        return Ok(());
+    }
+
+    // Connection to the RabbitMQ server
+    let amqp_connection = Arc::new(Mutex::new(
+        amiquip::Connection::insecure_open(MQ_URL).expect("Failed to connect to RabbitMQ server"),
+    ));
 
     // Delete existing database
     if args.flush_data {
@@ -66,6 +85,22 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to establish database connection")
         .run_pending_migrations(MIGRATIONS)
         .expect("Failed to run migrations");
+
+    // Start some independent judger process
+    let judger_count = thread::available_parallelism()
+        .expect("Failed to get available parallelism")
+        .get();
+    let mut judgers = vec![];
+    for i in 0..judger_count {
+        let judger = Command::new("target/debug/oj")
+            .arg("-j")
+            .arg(i.to_string())
+            .arg("-c")
+            .arg(&config_path)
+            .spawn()
+            .expect("Failed to spawn judger process");
+        judgers.push(judger);
+    }
 
     // Create connection pool
     let manager = ConnectionManager::<SqliteConnection>::new(DB_URL);
@@ -88,6 +123,13 @@ async fn main() -> std::io::Result<()> {
             .wrap(Logger::default())
             .app_data(Data::new(config.clone()))
             .app_data(Data::new(pool.clone()))
+            .app_data(Data::new(
+                amqp_connection
+                    .lock()
+                    .expect("Failed to obtain amqp connection lock")
+                    .open_channel(None)
+                    .expect("Failed to open amqp channel"),
+            ))
             .app_data(query_cfg.clone())
             .app_data(path_cfg.clone())
             .app_data(json_cfg.clone())
@@ -105,8 +147,8 @@ async fn main() -> std::io::Result<()> {
             .service(exit)
     })
     .bind((
-        args.config.server.bind_address.to_string(),
-        args.config.server.bind_port,
+        args.config.1.server.bind_address.to_string(),
+        args.config.1.server.bind_port,
     ))?
     .run()
     .await
