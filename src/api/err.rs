@@ -64,6 +64,18 @@ impl From<diesel::result::Error> for Error {
                 log::info!(target: "persistent", "Not Found");
                 Error::new(Reason::NotFound, "Not Found".to_string())
             }
+            diesel::result::Error::DatabaseError(kind, info) => {
+                log::error!("Database error! {kind:?}: {:?} {:?} {:?} {} {:?}", info.table_name(), info.column_name(), info.constraint_name(), info.message(), info.details());
+                Error::new(Reason::External, "Database error".to_string())
+            }
+            diesel::result::Error::AlreadyInTransaction => {
+                log::error!("Already In Transaction");
+                Error::new(Reason::External, "Database error".to_string())
+            }
+            diesel::result::Error::BrokenTransactionManager => {
+                log::error!("Already In Transaction");
+                Error::new(Reason::External, "Database error".to_string())
+            }
             _ => {
                 log::error!(target: "persistent", "Database error: {}", err);
                 Error::new(Reason::External, "Database error".to_string())

@@ -243,6 +243,7 @@ pub async fn new_job(
                 Some(problem) => {
                     let pid = problem.id;
                     let uid = submission.user_id;
+                    log::info!(target: TARGET, "Checking if user exists...");
                     let user_exists = models::does_user_exist(conn, uid as i32)?;
                     if !user_exists {
                         log::info!(target: TARGET, "No such user: {}", submission.user_id);
@@ -305,6 +306,8 @@ pub async fn new_job(
                         }
                     }
 
+                    log::info!(target: TARGET, "Submission checked");
+
                     let created = Utc::now();
 
                     // Add the job to the jobs list with Queueing status
@@ -325,7 +328,13 @@ pub async fn new_job(
                             })
                             .collect(),
                     };
-                    let job_id = models::new_job(conn, job.clone().into())?.id;
+                    let job_id = loop {
+                        let job = models::new_job(conn, job.clone().into());
+                        if job.is_ok() {
+                            break job.unwrap().id;
+                        }
+                        log::warn!(target: TARGET, "Database error; retrying");
+                    };
                     log::info!(target: TARGET, "Job {} created", job_id);
 
                     // Start a new thread to judge and update job status
