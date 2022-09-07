@@ -1,3 +1,5 @@
+use std::process;
+
 use actix_web::{
     delete, get, post, put,
     web::{self, Data, Json, Path, Query},
@@ -202,7 +204,7 @@ fn queue_job(id: i32, channel: &Channel) -> Result<(), Error> {
     let exchange = Exchange::direct(channel);
 
     exchange
-        .publish(Publish::new(&id.to_ne_bytes(), "judger"))
+        .publish(Publish::new(&id.to_ne_bytes(), format!("judger{}", process::id())))
         .map_err(|err| {
             log::error!(target: "queue_job", "Failed to publish message: {err}");
             Error::new(Reason::External, "Message queue error".to_string())
@@ -243,6 +245,7 @@ pub async fn new_job(
                 Some(problem) => {
                     let pid = problem.id;
                     let uid = submission.user_id;
+                    log::info!(target: TARGET, "Checking if user exists...");
                     let user_exists = models::does_user_exist(conn, uid as i32)?;
                     if !user_exists {
                         log::info!(target: TARGET, "No such user: {}", submission.user_id);
@@ -305,11 +308,21 @@ pub async fn new_job(
                         }
                     }
 
+                    log::info!(target: TARGET, "Submission checked");
+
                     let created = Utc::now();
+
+                    let jobs_count = loop {
+                        let cnt = models::jobs_count(conn);
+                        if cnt.is_ok() {
+                            break cnt.unwrap();
+                        }
+                        log::warn!(target: TARGET, "Database error; retrying");
+                    };
 
                     // Add the job to the jobs list with Queueing status
                     let job = Job {
-                        id: models::jobs_count(conn)? as u32,
+                        id: jobs_count as u32,
                         created_time: created,
                         updated_time: created,
                         submission: submission.clone(),
@@ -325,7 +338,13 @@ pub async fn new_job(
                             })
                             .collect(),
                     };
-                    let job_id = models::new_job(conn, job.clone().into())?.id;
+                    let job_id = loop {
+                        let job = models::new_job(conn, job.clone().into());
+                        if job.is_ok() {
+                            break job.unwrap().id;
+                        }
+                        log::warn!(target: TARGET, "Database error; retrying");
+                    };
                     log::info!(target: TARGET, "Job {} created", job_id);
 
                     // Start a new thread to judge and update job status
