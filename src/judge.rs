@@ -281,7 +281,7 @@ pub fn judge(conn: &mut SqliteConnection, config: &Config, name: &str, jid: i32)
     log::info!(target: target, "Judging ended");
 }
 
-pub fn main(id: i32, config: Config) {
+pub fn main(parent: u32, id: i32, config: Config) {
     let sql_connection =
         &mut SqliteConnection::establish(super::DB_URL).expect("Unable to connect to database");
     sql_connection
@@ -301,7 +301,7 @@ pub fn main(id: i32, config: Config) {
         .expect("Failed to enable load balance");
 
     let queue = channel
-        .queue_declare("judger", QueueDeclareOptions::default())
+        .queue_declare(format!("judger{parent}"), QueueDeclareOptions::default())
         .expect("Failed to create queue");
 
     let consumer = queue

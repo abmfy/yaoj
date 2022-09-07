@@ -94,6 +94,10 @@ pub struct Args {
     /// Run this process as judger process with given id
     #[clap(short, long)]
     pub judger: Option<i32>,
+
+    /// The parent of this judger
+    #[clap(short, long)]
+    pub parent: Option<u32>
 }
 
 fn parse_config(path: &str) -> Result<(String, Config), std::io::Error> {

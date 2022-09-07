@@ -1,3 +1,5 @@
+use std::process;
+
 use actix_web::{
     delete, get, post, put,
     web::{self, Data, Json, Path, Query},
@@ -202,7 +204,7 @@ fn queue_job(id: i32, channel: &Channel) -> Result<(), Error> {
     let exchange = Exchange::direct(channel);
 
     exchange
-        .publish(Publish::new(&id.to_ne_bytes(), "judger"))
+        .publish(Publish::new(&id.to_ne_bytes(), format!("judger{}", process::id())))
         .map_err(|err| {
             log::error!(target: "queue_job", "Failed to publish message: {err}");
             Error::new(Reason::External, "Message queue error".to_string())

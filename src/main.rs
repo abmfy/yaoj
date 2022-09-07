@@ -1,5 +1,5 @@
 use std::{
-    process::Command,
+    process::{Command, self},
     sync::{Arc, Mutex},
     thread,
 };
@@ -64,7 +64,7 @@ async fn main() -> std::io::Result<()> {
 
     // Independent judger process
     if let Some(id) = args.judger {
-        judge::main(id, config);
+        judge::main(args.parent.unwrap(), id, config);
         return Ok(());
     }
 
@@ -97,6 +97,8 @@ async fn main() -> std::io::Result<()> {
             .arg(i.to_string())
             .arg("-c")
             .arg(&config_path)
+            .arg("-p")
+            .arg(&process::id().to_string())
             .spawn()
             .expect("Failed to spawn judger process");
         judgers.push(judger);
