@@ -152,5 +152,12 @@ async fn main() -> std::io::Result<()> {
         args.config.1.server.bind_port,
     ))?
     .run()
-    .await
+    .await?;
+
+    // Kill child processes before exiting
+    for judger in &mut judgers {
+        let _ = judger.kill();
+    }
+
+    Ok(())
 }
