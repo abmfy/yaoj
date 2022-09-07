@@ -310,9 +310,17 @@ pub async fn new_job(
 
                     let created = Utc::now();
 
+                    let jobs_count = loop {
+                        let cnt = models::jobs_count(conn);
+                        if cnt.is_ok() {
+                            break cnt.unwrap();
+                        }
+                        log::warn!(target: TARGET, "Database error; retrying");
+                    };
+
                     // Add the job to the jobs list with Queueing status
                     let job = Job {
-                        id: models::jobs_count(conn)? as u32,
+                        id: jobs_count as u32,
                         created_time: created,
                         updated_time: created,
                         submission: submission.clone(),
