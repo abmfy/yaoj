@@ -177,11 +177,18 @@ pub async fn login(
     Ok(HttpResponse::Ok().cookie(cookie).json(user))
 }
 
+#[cfg(feature = "authorization")]
+#[derive(Deserialize)]
+pub struct ChangePasswordForm {
+    pub old_password: String,
+    pub new_password: String,
+}
+
 /// Change current user's password
 #[cfg(feature = "authorization")]
 #[post("/passwd")]
 pub async fn change_password(
-    new_passwd: Json<String>,
+    form: Json<ChangePasswordForm>,
     pool: Data<DbPool>,
     user_claims: UserClaims,
 ) -> Result<HttpResponse, Error> {
@@ -190,10 +197,22 @@ pub async fn change_password(
 
     let conn = &mut pool.get()?;
 
+    let form = form.into_inner();
+
     use self::users::dsl::*;
 
+    // Check if the old password is correct
+    let user = users.find(user_claims.id as i32).first::<User>(conn)?;
+    if user.passwd != form.old_password {
+        log::info!(target: TARGET, "Wrong password");
+        return Err(Error::new(
+            Reason::InvalidArgument,
+            "Wrong password".to_string(),
+        ));
+    }
+
     diesel::update(users.find(user_claims.id as i32))
-        .set(passwd.eq(new_passwd.into_inner()))
+        .set(passwd.eq(form.new_password))
         .execute(conn)?;
 
     log::info!(target: TARGET, "Request done");

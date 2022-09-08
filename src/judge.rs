@@ -301,9 +301,8 @@ pub fn judge(conn: &mut SqliteConnection, config: &Config, name: &str, jid: i32)
                 .zip(answer.chars())
                 .position(|(a, b)| a != b)
                 .unwrap_or(output.len());
-            case_result.info = format!(
-                "Output differs from answer at the {pos}-th character (counting from 0)",
-            );
+            case_result.info =
+                format!("Output differs from answer at the {pos}-th character (counting from 0)",);
             update_result!(JobResult::WrongAnswer, "Test case {id}: Wrong Answer");
         }
     }
