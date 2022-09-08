@@ -89,7 +89,7 @@ where
 
 #[derive(Serialize, Deserialize, Clone, FromRequest)]
 pub struct UserClaims {
-    id: u32,
+    pub id: u32,
     pub role: Role,
 }
 
@@ -182,7 +182,7 @@ pub async fn login(
     cookie.set_secure(false);
 
     log::info!(target: TARGET, "Request done");
-    Ok(HttpResponse::Ok().cookie(cookie).finish())
+    Ok(HttpResponse::Ok().cookie(cookie).json(user))
 }
 
 /// Change current user's password

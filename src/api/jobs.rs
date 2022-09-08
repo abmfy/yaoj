@@ -224,9 +224,19 @@ pub async fn new_job(
     config: Data<Config>,
     pool: Data<DbPool>,
     amqp_channel: Data<Channel>,
+    #[cfg(feature = "authorization")] user_claims: UserClaims,
 ) -> Result<Json<Job>, Error> {
     const TARGET: &str = "POST /jobs";
     log::info!(target: TARGET, "Request received");
+
+    // You can only submit for yourself
+    #[cfg(feature = "authorization")]
+    if submission.user_id != user_claims.id {
+        return Err(Error::new(
+            Reason::Forbidden,
+            "You are not allowed to submit on behalf of others".to_string(),
+        ));
+    }
 
     let pool_cloned = pool.clone();
     let conn = &mut web::block(move || pool_cloned.get()).await??;
