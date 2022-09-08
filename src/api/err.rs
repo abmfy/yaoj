@@ -1,5 +1,6 @@
 use std::fmt::{self, Display};
 
+#[cfg(feature = "authorization")]
 use actix_jwt_auth_middleware::AuthError;
 use actix_web::{error::BlockingError, HttpResponse, ResponseError};
 use http::StatusCode;
@@ -109,6 +110,7 @@ impl From<BlockingError> for Error {
     }
 }
 
+#[cfg(feature = "authorization")]
 impl From<AuthError> for Error {
     fn from(err: AuthError) -> Self {
         log::error!(target: "auth", "Auth error: {}", err);

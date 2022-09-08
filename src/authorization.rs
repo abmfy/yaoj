@@ -1,4 +1,6 @@
+#[cfg(feature = "authorization")]
 use actix_jwt_auth_middleware::{Authority, FromRequest};
+#[cfg(feature = "authorization")]
 use actix_web::{
     get, post,
     web::{Data, Json},
@@ -7,7 +9,6 @@ use actix_web::{
 use diesel::{
     backend::{self, Backend},
     deserialize::FromSql,
-    prelude::*,
     serialize::{IsNull, Output, ToSql},
     sql_types::Integer,
     sqlite::Sqlite,
@@ -15,6 +16,10 @@ use diesel::{
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "authorization")]
+use diesel::prelude::*;
+
+#[cfg(feature = "authorization")]
 use crate::{
     api::err::{Error, Reason},
     persistent::{
@@ -24,6 +29,7 @@ use crate::{
     DbPool,
 };
 
+#[cfg(feature = "authorization")]
 #[derive(Deserialize, Insertable)]
 #[diesel(table_name = users)]
 pub struct UserForm {
@@ -87,6 +93,14 @@ where
     }
 }
 
+#[cfg(feature = "authorization")]
+#[derive(Serialize, Deserialize, Clone)]
+pub struct UserClaims {
+    pub id: u32,
+    pub role: Role,
+}
+
+#[cfg(feature = "authorization")]
 #[derive(Serialize, Deserialize, Clone, FromRequest)]
 pub struct UserClaims {
     pub id: u32,
@@ -104,24 +118,8 @@ pub async fn verify_service_request_user(user_claims: UserClaims) -> bool {
     verify_service_request(user_claims, Role::User)
 }
 
-/// Login as root. For automatic test only
-#[get("/")]
-pub async fn root(auth_authority: Data<Authority<UserClaims>>) -> HttpResponse {
-    const TARGET: &str = "GET /";
-    log::info!(target: TARGET, "Logged in as root");
-
-    let mut cookie = auth_authority
-        .create_signed_cookie(UserClaims {
-            id: 0,
-            role: Role::Admin,
-        })
-        .expect("Failed to create cookie");
-    cookie.set_secure(false);
-
-    HttpResponse::Ok().cookie(cookie).finish()
-}
-
 /// Register a new user
+#[cfg(feature = "authorization")]
 #[post("/register")]
 pub async fn register(user: Json<UserForm>, pool: Data<DbPool>) -> Result<Json<User>, Error> {
     const TARGET: &str = "POST /register";
@@ -148,6 +146,7 @@ pub async fn register(user: Json<UserForm>, pool: Data<DbPool>) -> Result<Json<U
 }
 
 /// Login
+#[cfg(feature = "authorization")]
 #[post("/login")]
 pub async fn login(
     user: Json<UserForm>,
@@ -186,6 +185,7 @@ pub async fn login(
 }
 
 /// Change current user's password
+#[cfg(feature = "authorization")]
 #[post("/passwd")]
 pub async fn change_password(
     new_passwd: Json<String>,
@@ -207,6 +207,7 @@ pub async fn change_password(
     Ok(HttpResponse::Ok().finish())
 }
 
+#[cfg(feature = "authorization")]
 #[derive(Deserialize)]
 pub struct PrivilegeForm {
     username: String,
@@ -214,6 +215,7 @@ pub struct PrivilegeForm {
 }
 
 /// Change user's role
+#[cfg(feature = "authorization")]
 #[post("/privilege")]
 pub async fn privilege(
     privilege: Json<PrivilegeForm>,
