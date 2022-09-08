@@ -139,6 +139,7 @@ pub struct CaseResult {
     pub result: JobResult,
     pub time: u32,
     pub memory: u32,
+    pub info: String,
 }
 
 #[derive(Clone, Debug, AsExpression, FromSqlRow)]
@@ -351,6 +352,7 @@ pub async fn new_job(
                                 result: JobResult::Waiting,
                                 time: 0,
                                 memory: 0,
+                                info: "".to_string(),
                             })
                             .collect(),
                     };
@@ -469,6 +471,7 @@ pub async fn rejudge_job(
                     result: JobResult::Waiting,
                     time: 0,
                     memory: 0,
+                    info: "".to_string(),
                 })
                 .collect(),
             ..job

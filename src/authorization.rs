@@ -2,7 +2,7 @@
 use actix_jwt_auth_middleware::{Authority, FromRequest};
 #[cfg(feature = "authorization")]
 use actix_web::{
-    get, post,
+    post,
     web::{Data, Json},
     HttpResponse,
 };
@@ -91,13 +91,6 @@ where
             x => Err(format!("Unrecognized enum variant {x}").into()),
         }
     }
-}
-
-#[cfg(feature = "authorization")]
-#[derive(Serialize, Deserialize, Clone)]
-pub struct UserClaims {
-    pub id: u32,
-    pub role: Role,
 }
 
 #[cfg(feature = "authorization")]

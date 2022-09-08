@@ -1,4 +1,5 @@
 use std::{
+    env,
     process::{self, Command},
     sync::{Arc, Mutex},
     thread,
@@ -99,7 +100,7 @@ async fn main() -> std::io::Result<()> {
         .get();
     let mut judgers = vec![];
     for i in 0..judger_count {
-        let judger = Command::new("target/debug/oj")
+        let judger = Command::new(env::args().next().unwrap())
             .arg("-j")
             .arg(i.to_string())
             .arg("-c")

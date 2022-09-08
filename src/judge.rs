@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::process::{self, Command};
+use std::process::{self, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use amiquip::{
@@ -97,7 +97,12 @@ pub fn judge(conn: &mut SqliteConnection, config: &Config, name: &str, jid: i32)
     job.state = JobStatus::Running;
     push!();
 
-    let result = Command::new(args[0]).args(args.iter().skip(1)).status();
+    let mut child = Command::new(args[0])
+        .args(args.iter().skip(1))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Unable to spawn child process");
+    let result = child.wait();
 
     // Compilation error
     if result.is_err() || !result.unwrap().success() {
@@ -112,6 +117,16 @@ pub fn judge(conn: &mut SqliteConnection, config: &Config, name: &str, jid: i32)
             result: JobResult::CompilationError,
             time: now.elapsed().as_micros() as u32,
             memory: 0,
+            info: {
+                let mut buffer = String::new();
+                child
+                    .stderr
+                    .take()
+                    .expect("Unable to read stderr from compiler process")
+                    .read_to_string(&mut buffer)
+                    .expect("Unable to read stderr from compiler process");
+                buffer
+            },
         };
         push!();
         return;
@@ -123,6 +138,16 @@ pub fn judge(conn: &mut SqliteConnection, config: &Config, name: &str, jid: i32)
         result: JobResult::CompilationSuccess,
         time: now.elapsed().as_micros() as u32,
         memory: 0,
+        info: {
+            let mut buffer = String::new();
+            child
+                .stderr
+                .take()
+                .expect("Unable to read stderr from compiler process")
+                .read_to_string(&mut buffer)
+                .expect("Unable to read stderr from compiler process");
+            buffer
+        },
     };
     push!();
 
@@ -270,6 +295,15 @@ pub fn judge(conn: &mut SqliteConnection, config: &Config, name: &str, jid: i32)
         } else {
             log::info!(target: target, "Output: {output}*EOF*");
             log::info!(target: target, "Answer: {answer}*EOF*");
+            // The position where the output and the answer differ
+            let pos = output
+                .chars()
+                .zip(answer.chars())
+                .position(|(a, b)| a != b)
+                .unwrap_or(output.len());
+            case_result.info = format!(
+                "Output differs from answer at the {pos}-th character (counting from 0)",
+            );
             update_result!(JobResult::WrongAnswer, "Test case {id}: Wrong Answer");
         }
     }
