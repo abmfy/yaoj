@@ -1,15 +1,21 @@
 use std::{
-    process::{Command, self},
+    process::{self, Command},
     sync::{Arc, Mutex},
     thread,
 };
 
+#[cfg(feature = "authorization")]
+use actix_jwt_auth_middleware::{AuthService, Authority};
+#[cfg(feature = "authorization")]
+use actix_web::web;
 use actix_web::{
     middleware::Logger,
     post,
     web::{Data, JsonConfig, PathConfig, QueryConfig},
     App, HttpServer, Responder,
 };
+#[cfg(feature = "authorization")]
+use authorization::UserClaims;
 use clap::Parser;
 use diesel::{
     connection::SimpleConnection,
@@ -19,6 +25,7 @@ use diesel::{
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 mod api;
+mod authorization;
 mod config;
 mod judge;
 mod persistent;
@@ -120,6 +127,65 @@ async fn main() -> std::io::Result<()> {
     let json_cfg = JsonConfig::default()
         .error_handler(|err, _| Error::new(Reason::InvalidArgument, err.to_string()).into());
 
+    // JWT authority middleware
+    #[cfg(feature = "authorization")]
+    let auth_authority = Authority::<UserClaims>::default();
+
+    #[cfg(feature = "authorization")]
+    HttpServer::new(move || {
+        App::new()
+            .wrap(Logger::default())
+            .app_data(Data::new(config.clone()))
+            .app_data(Data::new(pool.clone()))
+            .app_data(Data::new(auth_authority.clone()))
+            .app_data(Data::new(
+                amqp_connection
+                    .lock()
+                    .expect("Failed to obtain amqp connection lock")
+                    .open_channel(None)
+                    .expect("Failed to open amqp channel"),
+            ))
+            .app_data(query_cfg.clone())
+            .app_data(path_cfg.clone())
+            .app_data(json_cfg.clone())
+            // Services that can be accessed without authorization
+            .service(authorization::register)
+            .service(authorization::login)
+            // Services that needed to login first
+            .service(
+                web::scope("")
+                    .wrap(AuthService::new(
+                        auth_authority.clone(),
+                        authorization::verify_service_request_user,
+                    ))
+                    .service(authorization::change_password)
+                    .service(api::jobs::new_job)
+                    .service(api::jobs::get_jobs)
+                    .service(api::jobs::get_job)
+                    .service(api::users::get_users)
+                    .service(api::contests::get_contests)
+                    .service(api::contests::get_contest)
+                    .service(api::contests::get_rank_list)
+                    // Services that only author or admin can access
+                    .service(api::jobs::rejudge_job)
+                    .service(api::jobs::cancel_job)
+                    .service(api::contests::update_contest)
+                    // Services that only admin can access
+                    .service(authorization::privilege)
+                    .service(api::users::update_user),
+            )
+            // DO NOT REMOVE: used in automatic testing
+            .service(exit)
+    })
+    .bind((
+        args.config.1.server.bind_address.to_string(),
+        args.config.1.server.bind_port,
+    ))?
+    .run()
+    .await?;
+
+    // For automatic test
+    #[cfg(not(feature = "authorization"))]
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())

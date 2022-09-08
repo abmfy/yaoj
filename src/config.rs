@@ -97,7 +97,7 @@ pub struct Args {
 
     /// The parent of this judger
     #[clap(short, long)]
-    pub parent: Option<u32>
+    pub parent: Option<u32>,
 }
 
 fn parse_config(path: &str) -> Result<(String, Config), std::io::Error> {

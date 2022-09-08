@@ -32,7 +32,9 @@ diesel::table! {
 diesel::table! {
     users (id) {
         id -> Integer,
+        user_role -> Integer,
         user_name -> Text,
+        passwd -> Text,
     }
 }
 

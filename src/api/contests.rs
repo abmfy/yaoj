@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::{api::err::Reason, config::Problem, persistent::models::User};
 use crate::{config::Config, persistent::models, DbPool};
 
+#[cfg(feature = "authorization")]
+use crate::authorization::{Role, UserClaims};
+
 use super::err::Error;
 
 #[derive(Serialize, Deserialize)]
@@ -55,9 +58,18 @@ pub async fn update_contest(
     contest: Json<Contest>,
     config: Data<Config>,
     pool: Data<DbPool>,
+    #[cfg(feature = "authorization")] user_claims: UserClaims,
 ) -> Result<Json<Contest>, Error> {
     const TARGET: &str = "POST /contests";
     log::info!(target: TARGET, "Request received");
+
+    #[cfg(feature = "authorization")]
+    if user_claims.role < Role::Author {
+        return Err(Error::new(
+            Reason::Forbidden,
+            "You have no permission to access this service".to_string(),
+        ));
+    }
 
     let contest = contest.into_inner();
 

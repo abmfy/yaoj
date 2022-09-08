@@ -25,6 +25,9 @@ use super::{
 
 use crate::{persistent::models, DbPool};
 
+#[cfg(feature = "authorization")]
+use crate::authorization::{Role, UserClaims};
+
 use crate::config::Config;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -204,7 +207,10 @@ fn queue_job(id: i32, channel: &Channel) -> Result<(), Error> {
     let exchange = Exchange::direct(channel);
 
     exchange
-        .publish(Publish::new(&id.to_ne_bytes(), format!("judger{}", process::id())))
+        .publish(Publish::new(
+            &id.to_ne_bytes(),
+            format!("judger{}", process::id()),
+        ))
         .map_err(|err| {
             log::error!(target: "queue_job", "Failed to publish message: {err}");
             Error::new(Reason::External, "Message queue error".to_string())
@@ -401,9 +407,19 @@ pub async fn rejudge_job(
     id: Path<i32>,
     pool: Data<DbPool>,
     amqp_channel: Data<Channel>,
+    #[cfg(feature = "authorization")] user_claims: UserClaims,
 ) -> Result<Json<Job>, Error> {
     const TARGET: &str = "PUT /jobs/{id}";
     log::info!(target: TARGET, "Request received");
+
+    #[cfg(feature = "authorization")]
+    if user_claims.role < Role::Author {
+        log::info!(target: TARGET, "Forbidden");
+        return Err(Error::new(
+            Reason::Forbidden,
+            "You have no permission to access this service".to_string(),
+        ));
+    }
 
     let pool_cloned = pool.clone();
     let conn = &mut web::block(move || pool_cloned.get()).await??;
@@ -459,9 +475,22 @@ pub async fn rejudge_job(
 }
 
 #[delete("/jobs/{id}")]
-pub async fn cancel_job(id: Path<i32>, pool: Data<DbPool>) -> Result<HttpResponse, Error> {
+pub async fn cancel_job(
+    id: Path<i32>,
+    pool: Data<DbPool>,
+    #[cfg(feature = "authorization")] user_claims: UserClaims,
+) -> Result<HttpResponse, Error> {
     const TARGET: &str = "DELETE /jobs/{id}";
     log::info!(target: TARGET, "Request received");
+
+    #[cfg(feature = "authorization")]
+    if user_claims.role < Role::Author {
+        log::info!(target: TARGET, "Forbidden");
+        return Err(Error::new(
+            Reason::Forbidden,
+            "You have no permission to access this service".to_string(),
+        ));
+    }
 
     let id = id.into_inner();
 

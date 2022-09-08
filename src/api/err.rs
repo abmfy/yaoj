@@ -1,5 +1,6 @@
 use std::fmt::{self, Display};
 
+use actix_jwt_auth_middleware::AuthError;
 use actix_web::{error::BlockingError, HttpResponse, ResponseError};
 use http::StatusCode;
 use serde::Serialize;
@@ -14,6 +15,7 @@ pub enum Reason {
     RateLimit,
     External,
     Internal,
+    Forbidden,
 }
 
 impl From<Reason> for String {
@@ -26,6 +28,7 @@ impl From<Reason> for String {
                 Reason::RateLimit => "RATE_LIMIT",
                 Reason::External => "EXTERNAL",
                 Reason::Internal => "INTERNAL",
+                Reason::Forbidden => "FORBIDDEN",
             }
     }
 }
@@ -48,6 +51,7 @@ impl Error {
             Reason::RateLimit => 4,
             Reason::External => 5,
             Reason::Internal => 6,
+            Reason::Forbidden => 7,
         };
         Error {
             code,
@@ -65,7 +69,14 @@ impl From<diesel::result::Error> for Error {
                 Error::new(Reason::NotFound, "Not Found".to_string())
             }
             diesel::result::Error::DatabaseError(kind, info) => {
-                log::error!("Database error! {kind:?}: {:?} {:?} {:?} {} {:?}", info.table_name(), info.column_name(), info.constraint_name(), info.message(), info.details());
+                log::error!(
+                    "Database error! {kind:?}: {:?} {:?} {:?} {} {:?}",
+                    info.table_name(),
+                    info.column_name(),
+                    info.constraint_name(),
+                    info.message(),
+                    info.details()
+                );
                 Error::new(Reason::External, "Database error".to_string())
             }
             diesel::result::Error::AlreadyInTransaction => {
@@ -98,6 +109,13 @@ impl From<BlockingError> for Error {
     }
 }
 
+impl From<AuthError> for Error {
+    fn from(err: AuthError) -> Self {
+        log::error!(target: "auth", "Auth error: {}", err);
+        Error::new(Reason::Internal, "Authorization error".to_string())
+    }
+}
+
 impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.message)
@@ -114,6 +132,7 @@ impl ResponseError for Error {
             Reason::RateLimit => StatusCode::BAD_REQUEST,
             Reason::External => StatusCode::INTERNAL_SERVER_ERROR,
             Reason::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Reason::Forbidden => StatusCode::FORBIDDEN,
         }
     }
 

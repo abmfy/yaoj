@@ -3,6 +3,8 @@ use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::api::err::{Error, Reason};
+
+use crate::authorization::Role;
 use crate::persistent::schema::users;
 
 #[derive(Insertable, AsChangeset, Deserialize)]
@@ -16,8 +18,12 @@ pub struct UserForm {
 #[derive(Queryable, Serialize)]
 pub struct User {
     pub id: i32,
+    #[serde(skip)]
+    pub user_role: Role,
     #[serde(rename = "name")]
     pub user_name: String,
+    #[serde(skip)]
+    pub passwd: String,
 }
 
 /// Returns if the user with specified id exists
