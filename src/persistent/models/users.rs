@@ -13,6 +13,10 @@ pub struct UserForm {
     pub id: Option<i32>,
     #[serde(rename = "name")]
     pub user_name: String,
+    #[serde(rename = "password")]
+    pub passwd: Option<String>,
+    #[serde(rename = "role")]
+    pub user_role: Option<Role>,
 }
 
 #[derive(Queryable, Serialize)]
